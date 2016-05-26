@@ -105,7 +105,7 @@ public:
   size_t wait_for_delta() const { return w_delta; }
   void set_wait_for_delta(size_t sz) { w_delta = sz; }
 
-private:
+protected:
   void InitStack(ucontext_t *link, size_t stack_size);
   virtual void Run() = 0;
 };
@@ -130,15 +130,18 @@ void WaitThreadPool();
 
 class SourceConditionVariable {
   Scheduler::Queue sleep_q;
+  size_t cap;
 public:
-  SourceConditionVariable() {
+  SourceConditionVariable() : cap(0) {
     sleep_q.Init();
   }
   SourceConditionVariable(const SourceConditionVariable &rhs) = delete;
   SourceConditionVariable(SourceConditionVariable &&rhs) = delete;
 
   void WaitForSize(size_t size, std::mutex *lock);
-  void Notify(size_t delta);
+  void Notify(size_t new_cap);
+
+  size_t capacity() const { return cap; }
 };
 
 class DummyChannel {}; // no virtual table, use if you prefer template style Channel
@@ -163,8 +166,8 @@ public:
   virtual void Write(const T &rhs) = 0;
 };
 
-template <typename T>
-class InputOutputChannel : public InputChannel<T>, OutputChannel<T> {};
+template <class T>
+class InputOutputChannel : public InputChannel<T>, public OutputChannel<T> {};
 
 // BaseClass could either be DummyChannel or InputOutputChannel
 template <typename T, class Container, class BaseClass>
@@ -182,7 +185,7 @@ public:
     }
     mutex.lock();
     while (queue.size() < size)
-	read_cv.WaitForSize(size, &mutex);
+      read_cv.WaitForSize(size, &mutex);
   }
 
   void AcquireWriteSpace(size_t size) {
@@ -190,14 +193,15 @@ public:
       throw std::invalid_argument("size larger than limit");
     }
     mutex.lock();
-    if (limit > 0) { // synchronous
+    if (limit > 0) {
       while (limit - queue.size() < size)
-	write_cv.WaitForSize(limit - size, &mutex);
+	write_cv.WaitForSize(size, &mutex);
     }
   }
   void EndRead(size_t size) { mutex.unlock(); }
   void EndWrite(size_t size) {
     if (limit == 0) {
+      // synchronous
       write_cv.WaitForSize(size, &mutex);
     }
     mutex.unlock();
@@ -205,27 +209,24 @@ public:
 
   void WriteOne(const T &rhs) {
     queue.push(rhs);
-    read_cv.Notify(1);
+    read_cv.Notify(queue.size());
   }
   T ReadOne() {
     T result(queue.front());
     queue.pop();
-    write_cv.Notify(1);
+    if (limit == 0)
+      write_cv.Notify(queue.size());
+    else
+      write_cv.Notify(limit - queue.size());
     return result;
   }
 
 };
 
-template <typename T, class BaseClass>
-class ChannelWrapper : public BaseClass {
+template <typename T, class BaseClass = DummyChannel>
+class InputChannelWrapper : public BaseClass {
 public:
   using BaseClass::BaseClass;
-
-  void Write(const T &rhs) {
-    this->AcquireWriteSpace(1);
-    this->WriteOne(rhs);
-    this->EndWrite(1);
-  }
 
   T Read() {
     this->AcquireReadSpace(1);
@@ -235,8 +236,28 @@ public:
   }
 };
 
+template <typename T, class BaseClass = DummyChannel>
+class OutputChannelWrapper : public BaseClass {
+public:
+  using BaseClass::BaseClass;
+
+  void Write(const T &rhs) {
+    this->AcquireWriteSpace(1);
+    this->WriteOne(rhs);
+    this->EndWrite(1);
+  }
+};
+
+template <typename T, class BaseClass>
+class InputOutputChannelWrapper : public InputChannelWrapper<T, DummyChannel>,
+				  public OutputChannelWrapper<T, DummyChannel>,
+				  public BaseClass {
+public:
+  using BaseClass::BaseClass;
+};
+
 template <typename T, class Container = std::queue<T>, class BaseClass = DummyChannel>
-using BufferChannel = ChannelWrapper<T, BaseBufferChannel<T, Container, BaseClass> >;
+using BufferChannel = InputOutputChannelWrapper<T, BaseBufferChannel<T, Container, BaseClass> >;
 
 }
 

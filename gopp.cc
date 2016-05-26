@@ -210,22 +210,24 @@ void SourceConditionVariable::WaitForSize(size_t size, std::mutex *lock)
 {
   auto sched = Scheduler::Current();
   sched->current_routine()->set_wait_for_delta(size);
+  cap += size;
   sched->RunNext(Scheduler::SleepState, &sleep_q, lock);
   lock->lock();
 }
 
-void SourceConditionVariable::Notify(size_t delta)
+void SourceConditionVariable::Notify(size_t new_cap)
 {
   auto ent = sleep_q.next;
   while (ent != &sleep_q) {
     auto next = ent->next;
     auto r = (Routine *) ent;
     auto amt = r->wait_for_delta();
-    // fprintf(stderr, "trying to wake up, amt %lu delta %lu\n", amt, delta);
-    if (amt > delta) return;
+    // fprintf(stderr, "trying to wake up, amt %lu new_cap %lu\n", amt, new_cap);
+    if (amt > new_cap) return;
     r->WakeUp();
 
-    delta -= amt;
+    cap -= amt;
+    new_cap -= amt;
     ent = next;
   }
 }
