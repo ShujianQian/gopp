@@ -15,6 +15,7 @@ class IOBuffer {
   std::list<uint8_t *> buffer_pages;
   int offset;
   int remain;
+  bool eof;
 
   static const ssize_t kBufferPageSize = 4096;
 public:
@@ -32,6 +33,10 @@ public:
   size_t size() const {
     return buffer_pages.size() * kBufferPageSize - offset - remain;
   }
+  bool is_eof() const {
+    return eof;
+  }
+  void set_eof() { eof = true; }
 };
 
 class InputSocketChannelBase;
@@ -123,12 +128,14 @@ class InputSocketChannelImpl : public InputSocketChannelBase, public BaseClass {
 public:
   using InputSocketChannelBase::InputSocketChannelBase;
 
-  void AcquireReadSpace(size_t size) {
+  bool AcquireReadSpace(size_t size) {
     mutex.lock();
     while (q.size() < size) {
+      if (q.is_eof()) return false;
       sock->WatchRead();
       read_cv.WaitForSize(size, &mutex);
     }
+    return true;
   }
   void EndRead(size_t size) {
     if (read_cv.capacity() == 0) {
@@ -140,6 +147,9 @@ public:
     uint8_t b = 0;
     q.PopFront(&b, 1);
     return b;
+  }
+  void ReadAll(uint8_t *buf, size_t cnt) {
+    q.PopFront(buf, cnt);
   }
 };
 
@@ -160,12 +170,14 @@ friend EPollSocket;
 public:
   using AcceptSocketChannelBase::AcceptSocketChannelBase;
 
-  void AcquireReadSpace(size_t size) {
+  bool AcquireReadSpace(size_t size) {
     mutex.lock();
     while (q.size() < size * sizeof(int)) {
+      if (q.is_eof()) return false;
       sock->WatchRead();
       read_cv.WaitForSize(size * sizeof(int), &mutex);
     }
+    return true;
   }
   void EndRead(size_t size) {
     if (read_cv.capacity() == 0) {
@@ -173,10 +185,19 @@ public:
     }
     mutex.unlock();
   }
-  int ReadOne() {
+  int ReadOne(bool &eof) {
     int new_fd = 0;
-    q.PopFront((uint8_t *) &new_fd, sizeof(int));
+    if (q.is_empty() && q.is_eof()) {
+      eof = true;
+    } else {
+      eof = false;
+      q.PopFront((uint8_t *) &new_fd, sizeof(int));
+    }
     return new_fd;
+  }
+
+  void ReadAll(int *buf, size_t cnt) {
+    q.PopFront((uint8_t *) buf, cnt * sizeof(int));
   }
 };
 
@@ -208,18 +229,33 @@ public:
   void AcquireWriteSpace(size_t size) {
     mutex.lock();
     if (limit > 0) {
-      while (limit - q.size() < size) {
+      while (limit - q.size() < size && !q.is_eof()) {
 	write_cv.WaitForSize(size, &mutex);
       }
     }
   }
   void EndWrite(size_t size) {
-    if (limit == 0)
+    if (limit == 0 && !q.is_eof()) {
       write_cv.WaitForSize(size, &mutex);
+    }
     mutex.unlock();
   }
   void WriteOne(uint8_t b) {
     q.PushBack(&b, 1);
+  }
+  void WriteAll(uint8_t *buf, size_t cnt) {
+    q.PushBack(buf, cnt);
+  }
+  void Close() {
+    std::lock_guard<std::mutex> _(mutex);
+    q.set_eof();
+  }
+  void Flush() {
+    if (limit > 0) {
+      std::lock_guard<std::mutex> _(mutex);
+      while (!q.is_empty())
+	write_cv.WaitForSize(0, &mutex);
+    }
   }
 };
 

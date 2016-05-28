@@ -150,10 +150,13 @@ template <typename T>
 class InputChannel { // has virtual table, use if you prefer virtual style Channel
 public:
   virtual ~InputChannel() {}
-  virtual void AcquireReadSpace(size_t size) = 0;
+  virtual bool AcquireReadSpace(size_t size) = 0;
   virtual void EndRead(size_t size) = 0;
   virtual T ReadOne() = 0;
-  virtual T Read() = 0;
+  virtual void ReadAll(T *buf, size_t cnt) {
+    for (int i = 0; i < cnt; i++) buf[i] = ReadOne();
+  }
+  virtual T Read(bool &eof) = 0;
 };
 
 template <typename T>
@@ -163,7 +166,12 @@ public:
   virtual void AcquireWriteSpace(size_t size) = 0;
   virtual void EndWrite(size_t size) = 0;
   virtual void WriteOne(const T &rhs) = 0;
+  virtual void WriteAll(T *buf, size_t cnt) {
+    for (int i = 0; i < cnt; i++) WriteOne(buf[i]);
+  }
   virtual void Write(const T &rhs) = 0;
+  virtual void Close() = 0;
+  virtual void Flush() = 0;
 };
 
 template <class T>
@@ -176,16 +184,20 @@ class BaseBufferChannel : public BaseClass {
   Container queue;
   std::mutex mutex;
   size_t limit;
+  bool closed;
 public:
-  BaseBufferChannel(size_t lmt) : limit(lmt) {}
+  BaseBufferChannel(size_t lmt) : limit(lmt), closed(false) {}
 
-  void AcquireReadSpace(size_t size) {
+  bool AcquireReadSpace(size_t size) {
     if (size > limit && limit > 0) {
       throw std::invalid_argument("size larger than limit");
     }
     mutex.lock();
-    while (queue.size() < size)
+    while (queue.size() < size) {
+      if (closed) return false;
       read_cv.WaitForSize(size, &mutex);
+    }
+    return true;
   }
 
   void AcquireWriteSpace(size_t size) {
@@ -214,13 +226,25 @@ public:
   T ReadOne() {
     T result(queue.front());
     queue.pop();
-    if (limit == 0)
-      write_cv.Notify(queue.size());
-    else
+    if (limit > 0)
       write_cv.Notify(limit - queue.size());
+    else
+      write_cv.Notify(write_cv.capacity() - queue.size());
     return result;
   }
 
+  void Flush() {
+    if (limit > 0) {
+      std::lock_guard<std::mutex> _(mutex);
+      while (!queue.is_empty())
+	write_cv.WaitForSize(0, &mutex);
+    }
+  }
+
+  void Close() {
+    std::lock_guard<std::mutex> _(mutex);
+    closed = true;
+  }
 };
 
 template <typename T, class BaseClass = DummyChannel>
@@ -228,11 +252,22 @@ class InputChannelWrapper : public BaseClass {
 public:
   using BaseClass::BaseClass;
 
-  T Read() {
-    this->AcquireReadSpace(1);
-    T t = this->ReadOne();
+  T Read(bool &eof) {
+    eof = this->AcquireReadSpace(1);
+    if (eof) {
+      return T();
+    }
+    T t = this->ReadOne(eof);
     this->EndRead(1);
     return t;
+  }
+
+  bool Read(T *buf, size_t cnt = 1) {
+    bool eof = this->AcquireReadSpace(cnt);
+    if (eof) return false;
+    this->ReadAll(buf, cnt);
+    this->EndRead(cnt);
+    return true;
   }
 };
 
@@ -245,6 +280,12 @@ public:
     this->AcquireWriteSpace(1);
     this->WriteOne(rhs);
     this->EndWrite(1);
+  }
+
+  void Write(T *buf, size_t cnt = 1) {
+    this->AcquireWriteSpace(cnt);
+    this->WriteAll(buf, cnt);
+    this->EndWrite(cnt);
   }
 };
 

@@ -209,8 +209,8 @@ void WaitThreadPool()
 void SourceConditionVariable::WaitForSize(size_t size, std::mutex *lock)
 {
   auto sched = Scheduler::Current();
-  sched->current_routine()->set_wait_for_delta(size);
   cap += size;
+  sched->current_routine()->set_wait_for_delta(size);
   sched->RunNext(Scheduler::SleepState, &sleep_q, lock);
   lock->lock();
 }
@@ -226,8 +226,8 @@ void SourceConditionVariable::Notify(size_t new_cap)
     if (amt > new_cap) return;
     r->WakeUp();
 
-    cap -= amt;
     new_cap -= amt;
+    cap -= amt;
     ent = next;
   }
 }

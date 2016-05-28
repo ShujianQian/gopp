@@ -28,7 +28,8 @@ public:
     auto ch = new go::AcceptSocketChannel(10);
     new go::EPollSocket(fd, poll, ch);
     while (true) {
-      int client_fd = ch->Read();
+      bool eof = false;
+      int client_fd = ch->Read(eof);
       fprintf(stderr, "got new client %d\n", client_fd);
 
       auto rch = new go::InputSocketChannel(10);

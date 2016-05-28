@@ -86,7 +86,13 @@ void IOBuffer::Read(int fd, size_t max_len)
     iovcnt++;
   }
   auto rs = readv(fd, iov, iovcnt);
-  if (rs < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+  if (rs < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    rs = 0;
+  } else if (rs == 0) {
+    eof = true;
+  }
+
+  if (rs < 0) {
     perror("reav");
     return;
   }
@@ -139,10 +145,18 @@ void IOBuffer::Write(int fd, size_t max_len)
 
   auto rs = writev(fd, iov, iovcnt);
 
-  if (rs < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-    perror("writev");
-    return;
+  if (rs < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      rs = 0;
+    } else if (errno == EPIPE) {
+      eof = true;
+      rs = 0;
+    } else {
+      perror("writev");
+      return;
+    }
   }
+
   left = 0;
   for (int i = 0; i < iovcnt; i++) {
     left += iov[i].iov_len;
@@ -274,13 +288,17 @@ void AcceptSocketChannelBase::HandleIO()
   std::lock_guard<std::mutex> _(mutex);
   int nr = limit == 0 ? read_cv.capacity() / sizeof(int) : (limit - q.size()) / sizeof(int);
   for (int i = 0; i < nr; i++) {
+  again:
     struct sockaddr addr;
     socklen_t len = 0;
     memset(&addr, 0, sizeof(struct sockaddr));
     int new_sock = accept(sock->file_desc(), &addr, &len);
     if (new_sock < 0) {
-      if (errno == EWOULDBLOCK || errno == EAGAIN)
+      if (errno == EWOULDBLOCK || errno == EAGAIN) {
 	break;
+      } else if (errno == EINTR) {
+	goto again;
+      }
       perror("accept");
       continue;
     }
@@ -294,7 +312,7 @@ void OutputSocketChannelBase::HandleIO()
   std::lock_guard<std::mutex> _(mutex);
   q.Write(sock->file_desc(), q.size());
   if (limit == 0)
-    write_cv.Notify(q.size());
+    write_cv.Notify(write_cv.capacity() - q.size());
   else
     write_cv.Notify(limit - q.size());
 }
