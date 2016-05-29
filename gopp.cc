@@ -98,7 +98,7 @@ void Scheduler::UnRegisterScheduler()
 
 void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
 {
-  // fprintf(stderr, "RunNext() on thread %d\n", tls_thread_pool_id);
+  fprintf(stderr, "RunNext() on thread %d\n", tls_thread_pool_id);
   std::unique_lock<std::mutex> l(mutex);
 
   CollectGarbage();
@@ -212,6 +212,7 @@ void SourceConditionVariable::WaitForSize(size_t size, std::mutex *lock)
   cap += size;
   sched->current_routine()->set_wait_for_delta(size);
   sched->RunNext(Scheduler::SleepState, &sleep_q, lock);
+  cap -= size;
   lock->lock();
 }
 
@@ -227,7 +228,6 @@ void SourceConditionVariable::Notify(size_t new_cap)
     r->WakeUp();
 
     new_cap -= amt;
-    cap -= amt;
     ent = next;
   }
 }

@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <unistd.h>
 #include <cstring>
 #include <fcntl.h>
 
@@ -8,33 +9,46 @@
 #include "epoll-channel.h"
 
 class Connection : public go::Routine {
-  go::InputSocketChannel *in_channel;
-  go::OutputSocketChannel *out_channel;
+  go::EpollSocket *sock;
 public:
-  Connection(go::InputSocketChannel *in, go::OutputSocketChannel *out) :
-    in_channel(in), out_channel(out) {}
+  Connection(go::EpollSocket *s) : sock(s) {};
 
   virtual void Run() {
     fprintf(stderr, "New Client\n");
+    auto in = sock->input_channel();
+    while (true) {
+      uint8_t ch;
+      if (!in->Read(&ch)) {
+	fprintf(stderr, "client closed\n");
+	close(sock->file_desc());
+	return;
+      }
+      putchar(ch);
+    }
+    fprintf(stderr, "Done with this client\n");
   }
 };
 
 class ServerAcceptor : public go::Routine {
   int fd;
-  go::EPollThread *poll;
+  go::EpollThread *poll;
 public:
-  ServerAcceptor(int file_desc, go::EPollThread *epoll) : fd(file_desc), poll(epoll) {}
+  ServerAcceptor(int file_desc, go::EpollThread *epoll) : fd(file_desc), poll(epoll) {}
   virtual void Run() {
     auto ch = new go::AcceptSocketChannel(10);
-    new go::EPollSocket(fd, poll, ch);
+    new go::EpollSocketBase(fd, poll, ch);
     while (true) {
       bool eof = false;
       int client_fd = ch->Read(eof);
+      if (eof) {
+	fprintf(stderr, "server socket accidentially closed\n");
+	std::abort();
+      }
       fprintf(stderr, "got new client %d\n", client_fd);
 
-      auto rch = new go::InputSocketChannel(10);
-      new go::EPollSocket(fd, poll, rch);
-      (new Connection(rch, nullptr))->StartOn(1);
+      auto sock = new go::EpollSocket(client_fd, poll, new go::InputSocketChannel(10));
+      auto client_routine = new Connection(sock);
+      client_routine->StartOn(1);
     }
   }
 };
@@ -68,7 +82,7 @@ int main(int argc, char *argv[])
 
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
 
-  go::EPollThread *poll = new go::EPollThread();
+  go::EpollThread *poll = new go::EpollThread();
 
   auto main_routine = new ServerAcceptor(fd, poll);
   main_routine->StartOn(1);

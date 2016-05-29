@@ -253,17 +253,18 @@ public:
   using BaseClass::BaseClass;
 
   T Read(bool &eof) {
-    eof = this->AcquireReadSpace(1);
+    eof = !this->AcquireReadSpace(1);
     if (eof) {
+      this->EndRead(1);
       return T();
     }
-    T t = this->ReadOne(eof);
+    T t = this->ReadOne();
     this->EndRead(1);
     return t;
   }
 
   bool Read(T *buf, size_t cnt = 1) {
-    bool eof = this->AcquireReadSpace(cnt);
+    bool eof = !this->AcquireReadSpace(cnt);
     if (eof) return false;
     this->ReadAll(buf, cnt);
     this->EndRead(cnt);

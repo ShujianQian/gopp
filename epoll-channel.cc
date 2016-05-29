@@ -169,30 +169,33 @@ void IOBuffer::Write(int fd, size_t max_len)
   }
 }
 
-EPollThread::EPollThread()
+EpollThread::EpollThread()
 {
   fd = epoll_create(1);
 }
 
-EPollThread::~EPollThread()
+EpollThread::~EpollThread()
 {
   close(fd);
 }
 
-void EPollThread::ModifyWatchEvent(EPollSocket *data, uint32_t new_events)
+void EpollThread::ModifyWatchEvent(EpollSocketBase *data, uint32_t new_events)
 {
   struct epoll_event event;
   event.events = new_events;
   event.data.ptr = data;
   if (new_events == 0 && data->events != 0) {
+    fprintf(stderr, "epoll del fd %d\n", data->fd);
     if (epoll_ctl(fd, EPOLL_CTL_DEL, data->fd, &event) < 0) {
       goto fail;
     }
   } else if (data->events == 0 && new_events != 0) {
+    fprintf(stderr, "epoll add fd %d\n", data->fd);
     if (epoll_ctl(fd, EPOLL_CTL_ADD, data->fd, &event) < 0) {
       goto fail;
     }
   } else if (data->events != new_events) {
+    fprintf(stderr, "epoll modify fd %d\n", data->fd);
     if (epoll_ctl(fd, EPOLL_CTL_MOD, data->fd, &event) < 0) {
       goto fail;
     }
@@ -204,7 +207,7 @@ fail:
   std::abort();
 }
 
-void EPollThread::EventLoop()
+void EpollThread::EventLoop()
 {
   while (!should_exit) {
     struct epoll_event evt[kPollMaxEvents];
@@ -218,10 +221,10 @@ void EPollThread::EventLoop()
     }
     if (rs == 0) continue;
     for (int i = 0; i < rs; i++) {
-      auto data = (EPollSocket *) evt[i].data.ptr;
+      auto data = (EpollSocketBase *) evt[i].data.ptr;
       auto events = evt[i].events;
       if (events & EPOLLIN) {
-	if (data->type == EPollSocket::AcceptSocket) {
+	if (data->type == EpollSocketBase::AcceptSocket) {
 	  data->acc_channel->HandleIO();
 	} else {
 	  data->in_channel->HandleIO();
@@ -234,7 +237,7 @@ void EPollThread::EventLoop()
   }
 }
 
-EPollSocket::EPollSocket(int file_desc, EPollThread *epoll)
+EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll)
   : in_channel(nullptr), out_channel(nullptr), acc_channel(nullptr), poll(epoll), events(0),
     fd(file_desc)
 {
@@ -242,16 +245,16 @@ EPollSocket::EPollSocket(int file_desc, EPollThread *epoll)
 }
 
 
-EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, InputSocketChannelBase *in)
-  : EPollSocket(file_desc, epoll)
+EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll, InputSocketChannelBase *in)
+  : EpollSocketBase(file_desc, epoll)
 {
   type = ReadSocket;
   in_channel = in;
   in_channel->sock = this;
 }
 
-EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, InputSocketChannelBase *in, OutputSocketChannelBase *out)
-  : EPollSocket(file_desc, epoll)
+EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll, InputSocketChannelBase *in, OutputSocketChannelBase *out)
+  : EpollSocketBase(file_desc, epoll)
 {
   type = ReadWriteSocket;
   in_channel = in;
@@ -260,16 +263,16 @@ EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, InputSocketChannelBa
   out_channel->sock = this;
 }
 
-EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, OutputSocketChannelBase *out)
-  : EPollSocket(file_desc, epoll)
+EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll, OutputSocketChannelBase *out)
+  : EpollSocketBase(file_desc, epoll)
 {
   type = WriteSocket;
   out_channel = out;
   out_channel->sock = this;
 }
 
-EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, AcceptSocketChannelBase *acc)
-  : EPollSocket(file_desc, epoll)
+EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll, AcceptSocketChannelBase *acc)
+  : EpollSocketBase(file_desc, epoll)
 {
   type = AcceptSocket;
   acc_channel = acc;
@@ -279,14 +282,29 @@ EPollSocket::EPollSocket(int file_desc, EPollThread *epoll, AcceptSocketChannelB
 void InputSocketChannelBase::HandleIO()
 {
   std::lock_guard<std::mutex> _(mutex);
-  q.Read(sock->file_desc(), limit == 0 ? read_cv.capacity() : limit - q.size());
-  read_cv.Notify(q.size());
+  size_t max_len = limit == 0 ? read_cv.capacity() : limit - q.size();
+  if (max_len == 0) {
+    sock->UnWatchRead();
+    return;
+  }
+  q.Read(sock->file_desc(), max_len);
+  if (q.is_eof()) {
+    sock->UnWatchRead();
+    read_cv.Notify(read_cv.capacity());
+  } else {
+    read_cv.Notify(q.size());
+  }
+  return;
 }
 
 void AcceptSocketChannelBase::HandleIO()
 {
   std::lock_guard<std::mutex> _(mutex);
   int nr = limit == 0 ? read_cv.capacity() / sizeof(int) : (limit - q.size()) / sizeof(int);
+  if (nr == 0) {
+    sock->UnWatchRead();
+    return;
+  }
   for (int i = 0; i < nr; i++) {
   again:
     struct sockaddr addr;

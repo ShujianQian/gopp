@@ -43,31 +43,32 @@ class InputSocketChannelBase;
 class OutputSocketChannelBase;
 class AcceptSocketChannelBase;
 
-struct EPollSocket;
+struct EpollSocketBase;
 
-class EPollThread {
+class EpollThread {
   int fd;
   bool should_exit;
 public:
   static const int kPollMaxEvents = 16;
-  EPollThread();
-  ~EPollThread();
+  EpollThread();
+  ~EpollThread();
 
-  void ModifyWatchEvent(EPollSocket *data, uint32_t new_events);
+  void ModifyWatchEvent(EpollSocketBase *data, uint32_t new_events);
   void EventLoop();
 
   void set_should_exit(bool b) { should_exit = b; }
 };
 
-class EPollSocket {
+class EpollSocketBase {
+protected:
   InputSocketChannelBase *in_channel;
   OutputSocketChannelBase *out_channel;
   AcceptSocketChannelBase *acc_channel;
-  EPollThread *poll;
+  EpollThread *poll;
   uint32_t events;
   std::mutex mutex;
   int fd;
-friend EPollThread;
+friend EpollThread;
 public:
   void WatchRead() {
     std::lock_guard<std::mutex> _(mutex);
@@ -87,9 +88,6 @@ public:
   }
 
   int file_desc() const { return fd; }
-  InputSocketChannelBase *input_channel() const { return in_channel; }
-  OutputSocketChannelBase *output_channel() const { return out_channel; }
-  AcceptSocketChannelBase *accept_channel() const { return acc_channel; }
 
   enum SocketType {
     AcceptSocket,
@@ -97,15 +95,25 @@ public:
     WriteSocket,
     ReadWriteSocket,
   };
-  EPollSocket(int file_desc, EPollThread *epoll, InputSocketChannelBase *in);
-  EPollSocket(int file_desc, EPollThread *epoll, InputSocketChannelBase *in, OutputSocketChannelBase *out);
-  EPollSocket(int file_desc, EPollThread *epoll, OutputSocketChannelBase *out);
-  EPollSocket(int file_desc, EPollThread *epoll, AcceptSocketChannelBase *acc);
+  EpollSocketBase(int file_desc, EpollThread *epoll, InputSocketChannelBase *in);
+  EpollSocketBase(int file_desc, EpollThread *epoll, InputSocketChannelBase *in, OutputSocketChannelBase *out);
+  EpollSocketBase(int file_desc, EpollThread *epoll, OutputSocketChannelBase *out);
+  EpollSocketBase(int file_desc, EpollThread *epoll, AcceptSocketChannelBase *acc);
 
 protected:
-  EPollSocket(int file_desc, EPollThread *epoll);
+  EpollSocketBase(int file_desc, EpollThread *epoll);
 private:
   SocketType type;
+};
+
+template <typename InType, typename AcceptType, typename OutType>
+class GenericEpollSocket : public EpollSocketBase {
+public:
+  using EpollSocketBase::EpollSocketBase;
+
+  InType *input_channel() const { return (InType *) in_channel; }
+  AcceptType *output_channel() const { return (AcceptType *) out_channel; }
+  OutType *accept_channel() const { return (OutType *) acc_channel; }
 };
 
 class InputSocketChannelBase {
@@ -114,9 +122,9 @@ protected:
   SourceConditionVariable read_cv;
   IOBuffer q;
   size_t limit;
-  EPollSocket *sock;
-friend EPollThread;
-friend EPollSocket;
+  EpollSocketBase *sock;
+friend EpollThread;
+friend EpollSocketBase;
 public:
   InputSocketChannelBase(size_t lmt) : limit(lmt) {}
 private:
@@ -130,10 +138,13 @@ public:
 
   bool AcquireReadSpace(size_t size) {
     mutex.lock();
-    while (q.size() < size) {
-      if (q.is_eof()) return false;
+  again:
+    if (q.is_eof())
+      return false;
+    if (q.size() < size) {
       sock->WatchRead();
       read_cv.WaitForSize(size, &mutex);
+      goto again;
     }
     return true;
   }
@@ -156,7 +167,7 @@ public:
 typedef InputChannelWrapper<uint8_t, InputSocketChannelImpl<DummyChannel> > InputSocketChannel;
 
 class AcceptSocketChannelBase : public InputSocketChannelBase {
-friend EPollThread;
+friend EpollThread;
 public:
   AcceptSocketChannelBase(size_t lmt) : InputSocketChannelBase(sizeof(int) * lmt) {}
 private:
@@ -165,8 +176,8 @@ private:
 
 template <class BaseClass = DummyChannel>
 class AcceptSocketChannelImpl : public AcceptSocketChannelBase, public BaseClass {
-friend EPollThread;
-friend EPollSocket;
+friend EpollThread;
+friend EpollSocketBase;
 public:
   using AcceptSocketChannelBase::AcceptSocketChannelBase;
 
@@ -185,14 +196,9 @@ public:
     }
     mutex.unlock();
   }
-  int ReadOne(bool &eof) {
+  int ReadOne() {
     int new_fd = 0;
-    if (q.is_empty() && q.is_eof()) {
-      eof = true;
-    } else {
-      eof = false;
-      q.PopFront((uint8_t *) &new_fd, sizeof(int));
-    }
+    q.PopFront((uint8_t *) &new_fd, sizeof(int));
     return new_fd;
   }
 
@@ -209,9 +215,9 @@ protected:
   SourceConditionVariable write_cv;
   IOBuffer q;
   size_t limit;
-  EPollSocket *sock;
-friend EPollThread;
-friend EPollSocket;
+  EpollSocketBase *sock;
+friend EpollThread;
+friend EpollSocketBase;
 public:
   OutputSocketChannelBase(size_t lmt) : limit(lmt) {}
 
@@ -260,6 +266,8 @@ public:
 };
 
 typedef OutputChannelWrapper<int, OutputSocketChannelImpl<DummyChannel> > OutputSocketChannel;
+
+using EpollSocket = GenericEpollSocket<InputSocketChannel, AcceptSocketChannel, OutputSocketChannel>;
 
 }
 
