@@ -1,5 +1,6 @@
 // -*- c++ -*-
 
+// TODO: need to decouple the scheduler, synchronizations, and the channel into different files
 #ifndef GOPP_H
 #define GOPP_H
 
@@ -14,7 +15,9 @@
 #include <map>
 #include <condition_variable>
 
-#include "amd64-ucontext.h"
+#include <x86intrin.h>
+
+#include "ucontext.h"
 
 namespace go {
 
@@ -23,10 +26,10 @@ struct ScheduleEntity {
   ScheduleEntity *prev, *next;
 
   void Add(ScheduleEntity *parent) {
-    this->prev = parent;
-    this->next = parent->next;
-    parent->next->prev = this;
-    parent->next = this;
+    prev = parent;
+    next = parent->next;
+    next->prev = this;
+    prev->next = this;
   }
   void Detach() {
     prev->next = next;
@@ -36,7 +39,7 @@ struct ScheduleEntity {
   void Init() {
     prev = next = this;
   }
-  bool is_detached() const { return next == nullptr; }
+  bool is_detached() const { return prev == next && next == nullptr; }
 };
 
 class Routine;
@@ -46,13 +49,20 @@ class Scheduler {
 public:
   typedef ScheduleEntity Queue;
 private:
+friend Routine;
   std::mutex mutex;
   std::condition_variable cond;
-  size_t resp_count;
 
   Queue ready_q;
-  Routine *current, *delay_garbage;
-  ucontext_t host_ctx;
+
+  Routine *current;
+  ucontext_t *delay_garbage_ctx;
+  Routine *idle;
+
+  uint64_t stack_ver;
+
+  static Queue share_q;
+  static std::mutex share_m;
 
 public:
   Scheduler();
@@ -60,30 +70,42 @@ public:
 
   enum State {
     ReadyState,
+    NextReadyState,
     SleepState,
     ExitState,
   };
   void RunNext(State state, Queue *q = nullptr, OptionalMutex *sleep_lock = nullptr);
+  void BottomHalf(Routine *r);
   void CollectGarbage();
   void WakeUp(Routine *r, bool batch = false);
 
-  void Signal() { cond.notify_one(); }
-
   Routine *current_routine() const { return current; }
+  void Init(Routine *idle);
+
+  static void InitShareQueue();
 
   static Scheduler *Current();
   static int CurrentThreadPoolId();
   static void RegisterScheduler(int thread_id);
   static void UnRegisterScheduler();
+private:
+
+friend void WaitThreadPool();
 };
 
 class Routine : public ScheduleEntity {
+protected:
   ucontext_t *ctx;
   Scheduler *sched;
   size_t w_delta;
   bool reuse;
+  bool urgent;
+  bool share;
+  uint64_t stack_ver;
+
 friend Scheduler;
 public:
+
   static const size_t kStackSize = (1UL << 20);
 
   Routine();
@@ -94,28 +116,30 @@ public:
 
   void Reset();
 
-  void Run0() {
-    Run();
-    Scheduler::Current()->RunNext(Scheduler::ExitState);
-  }
-
   void StartOn(int thread_id) {
     assert(sched == nullptr);
-    assert(thread_id > 0);
+    assert(thread_id >= 0);
     WakeUpOn(thread_id);
   }
   void WakeUp() { WakeUpOn(0); }
 
   void WakeUpOn(int thread_id);
+  static Scheduler *FindSleepingScheduler();
+
+  void VoluntarilyPreempt(bool force = true);
 
   size_t wait_for_delta() const { return w_delta; }
   void set_wait_for_delta(size_t sz) { w_delta = sz; }
   void set_reuse(bool r) { reuse = r; }
-  bool is_reuse() const { return reuse; }
+  void set_urgent(bool u) { urgent = u; }
+  void set_share(bool s) { share = s; }
+
+  virtual void Run() = 0;
+  void Run0();
 
 protected:
   void InitStack(ucontext_t *link, size_t stack_size);
-  virtual void Run() = 0;
+  void InitFromGarbageContext(ucontext_t *ctx, void *sp);
 };
 
 template <class T>
@@ -134,21 +158,23 @@ Routine *Make(const T &obj)
 }
 
 void InitThreadPool(int nr_threads = 1);
+// you're responsible for your concurrency controls. This force every thread exists peacefully.
 void WaitThreadPool();
 
 void RunOnMainThread();
 
 Scheduler *GetSchedulerFromPool(int thread_id);
 
-class SourceConditionVariable {
+// Condition Variable like synchronization
+class WaitSlot {
   Scheduler::Queue sleep_q;
   size_t cap;
 public:
-  SourceConditionVariable() : cap(0) {
+  WaitSlot() : cap(0) {
     sleep_q.Init();
   }
-  SourceConditionVariable(const SourceConditionVariable &rhs) = delete;
-  SourceConditionVariable(SourceConditionVariable &&rhs) = delete;
+  WaitSlot(const WaitSlot &rhs) = delete;
+  WaitSlot(WaitSlot &&rhs) = delete;
 
   void WaitForSize(size_t size, OptionalMutex *lock);
   void Notify(size_t new_cap);
@@ -166,12 +192,32 @@ public:
   void unlock() {
     if (enabled) m.unlock();
   }
+  bool try_lock() {
+    if (enabled) return m.try_lock();
+    return true;
+  }
   OptionalMutex *mutex_ptr() {
     if (enabled) return this;
     else return nullptr;
   }
   void Enable() { enabled = true; }
   void Disable() { enabled = false; }
+};
+
+class WaitBarrier {
+  OptionalMutex m;
+  long counter;
+  WaitSlot slot;
+public:
+  WaitBarrier(long max_waiter) : counter(max_waiter) {}
+  void Wait() {
+    std::lock_guard<OptionalMutex> _(m);
+    if (--counter == 0) {
+      slot.Notify(0);
+    } else {
+      slot.WaitForSize(0, &m);
+    }
+  }
 };
 
 class DummyChannel {}; // no virtual table, use if you prefer template style Channel
@@ -210,7 +256,7 @@ class InputOutputChannel : public InputChannel<T>, public OutputChannel<T> {};
 // BaseClass could either be DummyChannel or InputOutputChannel
 template <typename T, class Container, class BaseClass>
 class BaseBufferChannel : public BaseClass {
-  SourceConditionVariable read_cv, write_cv;
+  WaitSlot read_cv, write_cv;
   Container queue;
   OptionalMutex mutex;
   size_t limit;

@@ -4,6 +4,8 @@
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/uio.h>
 #include <sys/types.h>
@@ -11,13 +13,66 @@
 
 namespace go {
 
-IOBuffer::IOBuffer()
+IOBuffer::IOBuffer(size_t total_buffer_size)
 {
   offset = 0;
   remain = kBufferPageSize;
   again = false;
+  eof = false;
   nr_pages = 1;
-  buffer_pages.push_back((uint8_t *) malloc(kBufferPageSize));
+
+  if (total_buffer_size == 0) {
+  prealloc_data = prealloc_head = nullptr;
+  prealloc_len = 0;
+  } else {
+    PreAllocBuffers(total_buffer_size);
+  }
+
+  buffer_pages.push_back(AllocBuffer());
+}
+
+void IOBuffer::PreAllocBuffers(size_t sz)
+{
+  prealloc_len = (sz / kBufferPageSize + 1) * kBufferPageSize;
+  prealloc_data = (uint8_t *) mmap(0, prealloc_len, PROT_READ | PROT_WRITE,
+				   MAP_ANONYMOUS | MAP_PRIVATE
+				   | MAP_HUGETLB | MAP_POPULATE,
+				   -1, 0);
+  if (prealloc_data == (void *) -1) {
+    perror("mmap");
+    std::abort();
+  }
+  uint8_t *p = prealloc_data;
+  while (p < prealloc_data + prealloc_len) {
+    if (p + kBufferPageSize < prealloc_data + prealloc_len)
+      *(uintptr_t *) p = (uintptr_t) p + kBufferPageSize;
+    else
+      *(uintptr_t *) p = 0;
+    p += kBufferPageSize;
+  }
+  prealloc_head = prealloc_data;
+}
+
+uint8_t *IOBuffer::AllocBuffer()
+{
+  auto p = prealloc_head;
+  if (p) {
+    auto next = *(uintptr_t *) prealloc_head;
+    prealloc_head = (uint8_t *) next;
+    return p;
+  } else {
+    return (uint8_t *) malloc(kBufferPageSize);
+  }
+}
+
+void IOBuffer::FreeBuffer(uint8_t *ptr)
+{
+  if (ptr >= prealloc_data && ptr < prealloc_data + prealloc_len) {
+    *(uintptr_t *) ptr = (uintptr_t) prealloc_head;
+      prealloc_head = ptr;
+  } else {
+    free(ptr);
+  }
 }
 
 void IOBuffer::PushBack(const uint8_t *p, size_t sz)
@@ -26,7 +81,7 @@ void IOBuffer::PushBack(const uint8_t *p, size_t sz)
 
   while (left > 0) {
     if (remain == 0) {
-      buffer_pages.push_back((uint8_t *) malloc(kBufferPageSize));
+      buffer_pages.push_back(AllocBuffer());
       nr_pages++;
       remain = kBufferPageSize;
     }
@@ -56,7 +111,7 @@ void IOBuffer::PopFront(uint8_t *p, size_t sz)
 
     if (offset == kBufferPageSize) {
       offset = 0;
-      free(buffer_pages.front());
+      FreeBuffer(buffer_pages.front());
       buffer_pages.pop_front();
       nr_pages--;
     }
@@ -65,6 +120,8 @@ void IOBuffer::PopFront(uint8_t *p, size_t sz)
 
 void IOBuffer::Read(int fd, size_t max_len)
 {
+  max_len = std::min((long) max_len, (IOV_MAX - 2) * kBufferPageSize);
+
   int maxiovcnt = (max_len - 1) / kBufferPageSize + 2;
   struct iovec iov[maxiovcnt];
   size_t left = max_len;
@@ -79,7 +136,7 @@ void IOBuffer::Read(int fd, size_t max_len)
       buf = buffer_pages.back() + kBufferPageSize - remain;
     } else {
       to_copy = kBufferPageSize;
-      buf = (uint8_t *) malloc(kBufferPageSize);
+      buf = AllocBuffer();
     }
 
     if (left < to_copy) to_copy = left;
@@ -114,7 +171,7 @@ void IOBuffer::Read(int fd, size_t max_len)
     if (left > rs) {
       remain = (remain - rs - kBufferPageSize) % kBufferPageSize + kBufferPageSize;
       for (int j = i + 1; j < iovcnt; j++) {
-	free(iov[j].iov_base);
+	FreeBuffer((uint8_t *) iov[j].iov_base);
       }
       break;
     }

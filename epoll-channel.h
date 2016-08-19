@@ -12,6 +12,10 @@ namespace go {
 
 // zero-copy, dynamically increment buffer
 class IOBuffer {
+  uint8_t *prealloc_data;
+  size_t prealloc_len;
+  uint8_t *prealloc_head;
+
   std::list<uint8_t *> buffer_pages;
   int nr_pages;
   int offset;
@@ -21,7 +25,11 @@ class IOBuffer {
 
   static const ssize_t kBufferPageSize = 16 << 10;
 public:
-  IOBuffer();
+  IOBuffer(size_t total_buffer_size = 0);
+
+  void PreAllocBuffers(size_t total_buffer_size);
+  uint8_t *AllocBuffer();
+  void FreeBuffer(uint8_t *buf);
 
   void PushBack(const uint8_t *p, size_t sz);
   void PopFront(uint8_t *p, size_t sz);
@@ -129,13 +137,13 @@ protected:
   EpollSocketBase *sock;
 friend EpollThread;
 friend EpollSocketBase;
-  SourceConditionVariable read_cv;
+  WaitSlot read_cv;
   bool single_thread;
 public:
-  InputSocketChannelBase(size_t lmt) : limit(lmt) {}
+  InputSocketChannelBase(size_t lmt) : limit(lmt), q(lmt) {}
   void More(int amount);
   void NotifyMoreIO() {
-    fprintf(stderr, "notify more io\n");
+    // fprintf(stderr, "notify more io\n");
     std::unique_lock<OptionalMutex> _(mutex);
     read_cv.Notify(read_cv.capacity());
   }
@@ -217,13 +225,13 @@ typedef InputChannelWrapper<int, AcceptSocketChannelImpl<DummyChannel> > AcceptS
 class OutputSocketChannelBase {
 protected:
   OptionalMutex mutex;
-  SourceConditionVariable write_cv;
+  WaitSlot write_cv;
   IOBuffer q;
   size_t limit;
   EpollSocketBase *sock;
 friend EpollThread;
 friend EpollSocketBase;
-  SourceConditionVariable handler_cv;
+  WaitSlot handler_cv;
 public:
   OutputSocketChannelBase(size_t lmt) : limit(lmt) {}
 
