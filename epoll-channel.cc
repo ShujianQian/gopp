@@ -15,6 +15,8 @@ IOBuffer::IOBuffer()
 {
   offset = 0;
   remain = kBufferPageSize;
+  again = false;
+  nr_pages = 1;
   buffer_pages.push_back((uint8_t *) malloc(kBufferPageSize));
 }
 
@@ -25,6 +27,7 @@ void IOBuffer::PushBack(const uint8_t *p, size_t sz)
   while (left > 0) {
     if (remain == 0) {
       buffer_pages.push_back((uint8_t *) malloc(kBufferPageSize));
+      nr_pages++;
       remain = kBufferPageSize;
     }
     size_t to_copy = left < remain ? left : remain;
@@ -55,6 +58,7 @@ void IOBuffer::PopFront(uint8_t *p, size_t sz)
       offset = 0;
       free(buffer_pages.front());
       buffer_pages.pop_front();
+      nr_pages--;
     }
   }
 }
@@ -85,9 +89,11 @@ void IOBuffer::Read(int fd, size_t max_len)
     left -= to_copy;
     iovcnt++;
   }
+  again = false;
   auto rs = readv(fd, iov, iovcnt);
   if (rs < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
     rs = 0;
+    again = true;
   } else if (rs == 0) {
     eof = true;
   }
@@ -100,12 +106,13 @@ void IOBuffer::Read(int fd, size_t max_len)
   left = 0;
   for (int i = 0; i < iovcnt; i++) {
     left += iov[i].iov_len;
-    if (i > 0)
+    if (i > 0) {
       buffer_pages.push_back((uint8_t *) iov[i].iov_base);
+      nr_pages++;
+    }
 
-    if (left >= rs) {
-      remain = (remain - rs) % kBufferPageSize + kBufferPageSize;
-      remain %= kBufferPageSize;
+    if (left > rs) {
+      remain = (remain - rs - kBufferPageSize) % kBufferPageSize + kBufferPageSize;
       for (int j = i + 1; j < iovcnt; j++) {
 	free(iov[j].iov_base);
       }
@@ -165,6 +172,7 @@ void IOBuffer::Write(int fd, size_t max_len)
       break;
     } else {
       buffer_pages.pop_front();
+      nr_pages--;
     }
   }
 }
@@ -185,17 +193,17 @@ void EpollThread::ModifyWatchEvent(EpollSocketBase *data, uint32_t new_events)
   event.events = new_events;
   event.data.ptr = data;
   if (new_events == 0 && data->events != 0) {
-    fprintf(stderr, "epoll del fd %d\n", data->fd);
+    // fprintf(stderr, "epoll del fd %d\n", data->fd);
     if (epoll_ctl(fd, EPOLL_CTL_DEL, data->fd, &event) < 0) {
       goto fail;
     }
   } else if (data->events == 0 && new_events != 0) {
-    fprintf(stderr, "epoll add fd %d\n", data->fd);
+    // fprintf(stderr, "epoll add fd %d %d\n", data->fd, new_events);
     if (epoll_ctl(fd, EPOLL_CTL_ADD, data->fd, &event) < 0) {
       goto fail;
     }
   } else if (data->events != new_events) {
-    fprintf(stderr, "epoll modify fd %d\n", data->fd);
+    // fprintf(stderr, "epoll modify fd %d %d\n", data->fd, new_events);
     if (epoll_ctl(fd, EPOLL_CTL_MOD, data->fd, &event) < 0) {
       goto fail;
     }
@@ -225,14 +233,15 @@ void EpollThread::EventLoop()
       auto events = evt[i].events;
       if (events & EPOLLIN) {
 	if (data->type == EpollSocketBase::AcceptSocket) {
-	  data->acc_channel->HandleIO();
+	  data->acc_channel->NotifyMoreIO();
 	} else {
-	  data->in_channel->HandleIO();
+	  data->in_channel->NotifyMoreIO();
 	}
       }
       if (events & EPOLLOUT) {
-	data->out_channel->HandleIO();
+	data->out_channel->NotifyMoreIO();
       }
+      // fprintf(stderr, "event %d fd %d\n", events, data->fd);
     }
   }
 }
@@ -279,10 +288,12 @@ EpollSocketBase::EpollSocketBase(int file_desc, EpollThread *epoll, AcceptSocket
   acc_channel->sock = this;
 }
 
-void InputSocketChannelBase::HandleIO()
+void InputSocketChannelBase::More(int amount)
 {
-  std::lock_guard<std::mutex> _(mutex);
-  size_t max_len = limit == 0 ? read_cv.capacity() : limit - q.size();
+  size_t max_len = limit == 0 ? read_cv.capacity() + amount : limit - q.size();
+  bool last_again = q.is_again();
+  // fprintf(stderr, "before qsize %lu\n", q.size());
+
   if (max_len == 0) {
     sock->UnWatchRead();
     return;
@@ -293,18 +304,24 @@ void InputSocketChannelBase::HandleIO()
     read_cv.Notify(read_cv.capacity());
   } else {
     read_cv.Notify(q.size());
+    if (last_again && !q.is_again()) { sock->UnWatchRead(); /* fprintf(stderr, "unwatching read\n"); */ }
+    else if (!last_again && q.is_again()) { sock->WatchRead(); /* fprintf(stderr, "watching read\n"); */ }
   }
-  return;
+  // fprintf(stderr, "qsize %lu amt %d again %d\n", q.size(), amount, q.is_again());
 }
 
-void AcceptSocketChannelBase::HandleIO()
+void AcceptSocketChannelBase::More(int amount)
 {
-  std::lock_guard<std::mutex> _(mutex);
   int nr = limit == 0 ? read_cv.capacity() / sizeof(int) : (limit - q.size()) / sizeof(int);
+  bool last_again = q.is_again();
+
   if (nr == 0) {
     sock->UnWatchRead();
     return;
   }
+
+  q.clear_again();
+
   for (int i = 0; i < nr; i++) {
   again:
     struct sockaddr addr;
@@ -313,6 +330,7 @@ void AcceptSocketChannelBase::HandleIO()
     int new_sock = accept(sock->file_desc(), &addr, &len);
     if (new_sock < 0) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
+	q.set_again();
 	break;
       } else if (errno == EINTR) {
 	goto again;
@@ -323,17 +341,33 @@ void AcceptSocketChannelBase::HandleIO()
     q.PushBack((uint8_t *) &new_sock, sizeof(int));
   }
   read_cv.Notify(q.size());
+
+  if (!last_again && q.is_again()) sock->WatchRead();
+  else if (last_again && !q.is_again()) sock->UnWatchRead();
 }
 
-void OutputSocketChannelBase::HandleIO()
+void OutputSocketChannelBase::More(int amount)
 {
-  std::lock_guard<std::mutex> _(mutex);
+  bool last_again = q.is_again();
   q.Write(sock->file_desc(), q.size());
-  if (limit == 0)
+
+  if (q.is_empty()) {
+    sock->UnWatchWrite();
+    return;
+  }
+  if (limit == 0) {
     write_cv.Notify(write_cv.capacity() - q.size());
-  else
+  } else {
     write_cv.Notify(limit - q.size());
+  }
+  if (last_again && !q.is_again()) { sock->UnWatchWrite(); fprintf(stderr, "unwatching write...\n"); }
+  else if (!last_again && q.is_again()) { sock->WatchWrite(); fprintf(stderr, "watching write...\n"); }
 }
+
+static EpollThread *g_poll;
+
+void CreateGlobalEpoll() { g_poll = new EpollThread(); }
+EpollThread *GlobalEpoll() { return g_poll; }
 
 }
 

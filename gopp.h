@@ -6,14 +6,15 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cassert>
+#include <limits.h>
 #include <queue>
 #include <array>
 #include <functional>
 #include <mutex>
 #include <map>
 #include <condition_variable>
-// unix only
-#include <ucontext.h>
+
+#include "amd64-ucontext.h"
 
 namespace go {
 
@@ -39,7 +40,7 @@ struct ScheduleEntity {
 };
 
 class Routine;
-class Source;
+class OptionalMutex;
 
 class Scheduler {
 public:
@@ -62,31 +63,36 @@ public:
     SleepState,
     ExitState,
   };
-  void RunNext(State state, Queue *q = nullptr, std::mutex *sleep_lock = nullptr);
+  void RunNext(State state, Queue *q = nullptr, OptionalMutex *sleep_lock = nullptr);
   void CollectGarbage();
-  void WakeUp(Routine *r);
+  void WakeUp(Routine *r, bool batch = false);
+
   void Signal() { cond.notify_one(); }
 
   Routine *current_routine() const { return current; }
 
   static Scheduler *Current();
+  static int CurrentThreadPoolId();
   static void RegisterScheduler(int thread_id);
   static void UnRegisterScheduler();
 };
 
 class Routine : public ScheduleEntity {
-  ucontext_t ctx;
+  ucontext_t *ctx;
   Scheduler *sched;
   size_t w_delta;
+  bool reuse;
 friend Scheduler;
 public:
-  static const size_t kStackSize = (16UL << 10);
+  static const size_t kStackSize = (1UL << 20);
 
   Routine();
   virtual ~Routine() {}
 
   Routine(const Routine &rhs) = delete;
   Routine(Routine &&rhs) = delete;
+
+  void Reset();
 
   void Run0() {
     Run();
@@ -104,6 +110,8 @@ public:
 
   size_t wait_for_delta() const { return w_delta; }
   void set_wait_for_delta(size_t sz) { w_delta = sz; }
+  void set_reuse(bool r) { reuse = r; }
+  bool is_reuse() const { return reuse; }
 
 protected:
   void InitStack(ucontext_t *link, size_t stack_size);
@@ -128,6 +136,10 @@ Routine *Make(const T &obj)
 void InitThreadPool(int nr_threads = 1);
 void WaitThreadPool();
 
+void RunOnMainThread();
+
+Scheduler *GetSchedulerFromPool(int thread_id);
+
 class SourceConditionVariable {
   Scheduler::Queue sleep_q;
   size_t cap;
@@ -138,10 +150,28 @@ public:
   SourceConditionVariable(const SourceConditionVariable &rhs) = delete;
   SourceConditionVariable(SourceConditionVariable &&rhs) = delete;
 
-  void WaitForSize(size_t size, std::mutex *lock);
+  void WaitForSize(size_t size, OptionalMutex *lock);
   void Notify(size_t new_cap);
 
   size_t capacity() const { return cap; }
+};
+
+class OptionalMutex {
+  std::mutex m;
+  bool enabled = true;
+public:
+  void lock() {
+    if (enabled) m.lock();
+  }
+  void unlock() {
+    if (enabled) m.unlock();
+  }
+  OptionalMutex *mutex_ptr() {
+    if (enabled) return this;
+    else return nullptr;
+  }
+  void Enable() { enabled = true; }
+  void Disable() { enabled = false; }
 };
 
 class DummyChannel {}; // no virtual table, use if you prefer template style Channel
@@ -166,7 +196,7 @@ public:
   virtual void AcquireWriteSpace(size_t size) = 0;
   virtual void EndWrite(size_t size) = 0;
   virtual void WriteOne(const T &rhs) = 0;
-  virtual void WriteAll(T *buf, size_t cnt) {
+  virtual void WriteAll(const T *buf, size_t cnt) {
     for (int i = 0; i < cnt; i++) WriteOne(buf[i]);
   }
   virtual void Write(const T &rhs) = 0;
@@ -182,11 +212,13 @@ template <typename T, class Container, class BaseClass>
 class BaseBufferChannel : public BaseClass {
   SourceConditionVariable read_cv, write_cv;
   Container queue;
-  std::mutex mutex;
+  OptionalMutex mutex;
   size_t limit;
   bool closed;
 public:
   BaseBufferChannel(size_t lmt) : limit(lmt), closed(false) {}
+
+  OptionalMutex &buffer_mutex() { return mutex; }
 
   bool AcquireReadSpace(size_t size) {
     if (size > limit && limit > 0) {
@@ -195,7 +227,7 @@ public:
     mutex.lock();
     while (queue.size() < size) {
       if (closed) return false;
-      read_cv.WaitForSize(size, &mutex);
+      read_cv.WaitForSize(size, mutex.mutex_ptr());
     }
     return true;
   }
@@ -207,14 +239,14 @@ public:
     mutex.lock();
     if (limit > 0) {
       while (limit - queue.size() < size)
-	write_cv.WaitForSize(size, &mutex);
+	write_cv.WaitForSize(size, mutex.mutex_ptr());
     }
   }
   void EndRead(size_t size) { mutex.unlock(); }
   void EndWrite(size_t size) {
     if (limit == 0) {
       // synchronous
-      write_cv.WaitForSize(size, &mutex);
+      write_cv.WaitForSize(size, mutex.mutex_ptr());
     }
     mutex.unlock();
   }
@@ -232,22 +264,29 @@ public:
       write_cv.Notify(write_cv.capacity() - queue.size());
     return result;
   }
+  void ReadAll(T *buf, size_t cnt) {
+    for (int i = 0; i < cnt; i++) buf[i] = ReadOne();
+  }
+  void WriteAll(const T *buf, size_t cnt) {
+    for (int i = 0; i < cnt; i++) WriteOne(buf[i]);
+  }
 
   void Flush() {
     if (limit > 0) {
-      std::lock_guard<std::mutex> _(mutex);
-      while (!queue.is_empty())
-	write_cv.WaitForSize(0, &mutex);
+      std::lock_guard<OptionalMutex> _(mutex);
+      while (!queue.empty())
+	write_cv.WaitForSize(0, mutex.mutex_ptr());
     }
   }
 
   void Close() {
-    std::lock_guard<std::mutex> _(mutex);
+    std::lock_guard<OptionalMutex> _(mutex);
     closed = true;
+    read_cv.Notify(LONG_MAX);
   }
 };
 
-template <typename T, class BaseClass = DummyChannel>
+template <typename T, class BaseClass>
 class InputChannelWrapper : public BaseClass {
 public:
   using BaseClass::BaseClass;
@@ -270,9 +309,14 @@ public:
     this->EndRead(cnt);
     return true;
   }
+
+  bool Read(void *raw, size_t cnt) {
+    assert(cnt % sizeof(T) == 0);
+    return Read((T *) raw, cnt / sizeof(T));
+  }
 };
 
-template <typename T, class BaseClass = DummyChannel>
+template <typename T, class BaseClass>
 class OutputChannelWrapper : public BaseClass {
 public:
   using BaseClass::BaseClass;
@@ -283,23 +327,26 @@ public:
     this->EndWrite(1);
   }
 
-  void Write(T *buf, size_t cnt = 1) {
+  void Write(const T *buf, size_t cnt = 1) {
     this->AcquireWriteSpace(cnt);
     this->WriteAll(buf, cnt);
     this->EndWrite(cnt);
   }
+
+  void Write(const void *raw, size_t cnt) {
+    assert(cnt % sizeof(T) == 0);
+    Write((T *) raw, cnt / sizeof(T));
+  }
 };
 
 template <typename T, class BaseClass>
-class InputOutputChannelWrapper : public InputChannelWrapper<T, DummyChannel>,
-				  public OutputChannelWrapper<T, DummyChannel>,
-				  public BaseClass {
+class InputOutputChannelWrapper : public BaseClass {
 public:
   using BaseClass::BaseClass;
 };
 
 template <typename T, class Container = std::queue<T>, class BaseClass = DummyChannel>
-using BufferChannel = InputOutputChannelWrapper<T, BaseBufferChannel<T, Container, BaseClass> >;
+using BufferChannel = InputOutputChannelWrapper<T, InputChannelWrapper<T, OutputChannelWrapper<T, BaseBufferChannel<T, Container, BaseClass> > > >;
 
 }
 

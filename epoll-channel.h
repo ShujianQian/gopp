@@ -13,11 +13,13 @@ namespace go {
 // zero-copy, dynamically increment buffer
 class IOBuffer {
   std::list<uint8_t *> buffer_pages;
+  int nr_pages;
   int offset;
   int remain;
   bool eof;
+  bool again;
 
-  static const ssize_t kBufferPageSize = 4096;
+  static const ssize_t kBufferPageSize = 16 << 10;
 public:
   IOBuffer();
 
@@ -31,19 +33,22 @@ public:
     return size() == 0;
   }
   size_t size() const {
-    return buffer_pages.size() * kBufferPageSize - offset - remain;
+    return nr_pages * kBufferPageSize - offset - remain;
   }
   bool is_eof() const {
     return eof;
   }
   void set_eof() { eof = true; }
+  void set_again() { again = true; }
+  void clear_again() { again = false; }
+  bool is_again() const { return again; }
 };
 
 class InputSocketChannelBase;
 class OutputSocketChannelBase;
 class AcceptSocketChannelBase;
 
-struct EpollSocketBase;
+class EpollSocketBase;
 
 class EpollThread {
   int fd;
@@ -112,23 +117,29 @@ public:
   using EpollSocketBase::EpollSocketBase;
 
   InType *input_channel() const { return (InType *) in_channel; }
-  AcceptType *output_channel() const { return (AcceptType *) out_channel; }
-  OutType *accept_channel() const { return (OutType *) acc_channel; }
+  OutType *output_channel() const { return (OutType *) out_channel; }
+  AcceptType *accept_channel() const { return (AcceptType *) acc_channel; }
 };
 
 class InputSocketChannelBase {
 protected:
-  std::mutex mutex;
-  SourceConditionVariable read_cv;
+  OptionalMutex mutex;
   IOBuffer q;
   size_t limit;
   EpollSocketBase *sock;
 friend EpollThread;
 friend EpollSocketBase;
+  SourceConditionVariable read_cv;
+  bool single_thread;
 public:
   InputSocketChannelBase(size_t lmt) : limit(lmt) {}
-private:
-  void HandleIO();
+  void More(int amount);
+  void NotifyMoreIO() {
+    fprintf(stderr, "notify more io\n");
+    std::unique_lock<OptionalMutex> _(mutex);
+    read_cv.Notify(read_cv.capacity());
+  }
+  OptionalMutex &buffer_mutex() { return mutex; }
 };
 
 template <class BaseClass = DummyChannel>
@@ -138,20 +149,15 @@ public:
 
   bool AcquireReadSpace(size_t size) {
     mutex.lock();
-  again:
-    if (q.is_eof())
-      return false;
-    if (q.size() < size) {
-      sock->WatchRead();
-      read_cv.WaitForSize(size, &mutex);
-      goto again;
+    while (q.size() < size) {
+      More(size);
+      if (q.size() >= size) break;
+      if (q.is_eof()) return false;
+      read_cv.WaitForSize(size, mutex.mutex_ptr());
     }
     return true;
   }
   void EndRead(size_t size) {
-    if (read_cv.capacity() == 0) {
-      sock->UnWatchRead();
-    }
     mutex.unlock();
   }
   uint8_t ReadOne () {
@@ -170,8 +176,7 @@ class AcceptSocketChannelBase : public InputSocketChannelBase {
 friend EpollThread;
 public:
   AcceptSocketChannelBase(size_t lmt) : InputSocketChannelBase(sizeof(int) * lmt) {}
-private:
-  void HandleIO();
+  void More(int amount);
 };
 
 template <class BaseClass = DummyChannel>
@@ -186,7 +191,7 @@ public:
     while (q.size() < size * sizeof(int)) {
       if (q.is_eof()) return false;
       sock->WatchRead();
-      read_cv.WaitForSize(size * sizeof(int), &mutex);
+      read_cv.WaitForSize(size * sizeof(int), mutex.mutex_ptr());
     }
     return true;
   }
@@ -211,20 +216,27 @@ typedef InputChannelWrapper<int, AcceptSocketChannelImpl<DummyChannel> > AcceptS
 
 class OutputSocketChannelBase {
 protected:
-  std::mutex mutex;
+  OptionalMutex mutex;
   SourceConditionVariable write_cv;
   IOBuffer q;
   size_t limit;
   EpollSocketBase *sock;
 friend EpollThread;
 friend EpollSocketBase;
+  SourceConditionVariable handler_cv;
 public:
   OutputSocketChannelBase(size_t lmt) : limit(lmt) {}
 
   void AcquireWriteSpace(size_t size);
   void EndWrite(size_t size);
-private:
-  void HandleIO();
+
+  void More(int amount);
+  void NotifyMoreIO() {
+    std::lock_guard<OptionalMutex> _(mutex);
+    write_cv.Notify(write_cv.capacity());
+  }
+
+  OptionalMutex &buffer_mutex() { return mutex; }
 };
 
 template <class BaseClass = DummyChannel>
@@ -236,38 +248,48 @@ public:
     mutex.lock();
     if (limit > 0) {
       while (limit - q.size() < size && !q.is_eof()) {
-	write_cv.WaitForSize(size, &mutex);
+	More(size);
+	if (limit - q.size() >= size) break;
+	if (q.is_eof()) break;
+	write_cv.WaitForSize(size, mutex.mutex_ptr());
       }
     }
   }
   void EndWrite(size_t size) {
     if (limit == 0 && !q.is_eof()) {
-      write_cv.WaitForSize(size, &mutex);
+      write_cv.WaitForSize(size, mutex.mutex_ptr());
     }
+    sock->WatchWrite();
     mutex.unlock();
   }
-  void WriteOne(uint8_t b) {
+  void WriteOne(const uint8_t &b) {
     q.PushBack(&b, 1);
   }
-  void WriteAll(uint8_t *buf, size_t cnt) {
+  void WriteAll(const uint8_t *buf, size_t cnt) {
     q.PushBack(buf, cnt);
   }
   void Close() {
-    std::lock_guard<std::mutex> _(mutex);
+    std::lock_guard<OptionalMutex> _(mutex);
     q.set_eof();
   }
   void Flush() {
     if (limit > 0) {
-      std::lock_guard<std::mutex> _(mutex);
-      while (!q.is_empty())
-	write_cv.WaitForSize(0, &mutex);
+      std::lock_guard<OptionalMutex> _(mutex);
+      while (!q.is_empty() && !q.is_eof()) {
+	More(q.size());
+	if (q.is_empty() || q.is_eof()) break;
+	write_cv.WaitForSize(0, mutex.mutex_ptr());
+      }
     }
   }
 };
 
-typedef OutputChannelWrapper<int, OutputSocketChannelImpl<DummyChannel> > OutputSocketChannel;
+typedef OutputChannelWrapper<uint8_t, OutputSocketChannelImpl<DummyChannel> > OutputSocketChannel;
 
 using EpollSocket = GenericEpollSocket<InputSocketChannel, AcceptSocketChannel, OutputSocketChannel>;
+
+void CreateGlobalEpoll();
+EpollThread *GlobalEpoll();
 
 }
 

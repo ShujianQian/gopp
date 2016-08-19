@@ -2,8 +2,8 @@
 #include <cassert>
 #include <cstring>
 #include <vector>
+#include <unistd.h>
 #include <pthread.h>
-#include <ucontext.h>
 #include <cstdarg>
 #include <atomic>
 #include <thread>
@@ -15,16 +15,16 @@ static void routine_func(Routine *routine)
   routine->Run0();
 }
 
+
 void Routine::InitStack(ucontext_t *link, size_t stack_size)
 {
-  memset(&ctx, 0, sizeof(ucontext_t));
-  ctx.uc_stack.ss_sp = malloc(stack_size);
-  ctx.uc_stack.ss_size = stack_size;
-  ctx.uc_link = link;
-  ctx.uc_mcontext.fpregs = &ctx.__fpregs_mem; /* weird, why this is undocumented? */
+  ctx = (ucontext_t *) calloc(1, sizeof(ucontext_t));
+  ctx->uc_stack.ss_sp = malloc(stack_size);
+  ctx->uc_stack.ss_size = stack_size;
+  ctx->uc_stack.ss_flags = 0;
+  ctx->uc_link = link;
 
-  makecontext(&ctx, (void (*)()) &routine_func, 1, this);
-  // fprintf(stderr, "Allocated stack %lu\n", stack_size);
+  makecontext(ctx, (void (*)()) &routine_func, this);
 }
 
 static __thread int tls_thread_pool_id = 0;
@@ -32,10 +32,15 @@ static std::vector<Scheduler *> g_schedulers;
 static bool g_thread_pool_should_exit = false;
 
 Routine::Routine()
-  : sched(nullptr)
+  : ctx(nullptr), sched(nullptr), reuse(false)
 {
-  memset(&ctx, 0, sizeof(ucontext_t));
+  Reset();
+}
+
+void Routine::Reset()
+{
   Init();
+  sched = nullptr;
 }
 
 void Routine::WakeUpOn(int tpid)
@@ -48,7 +53,7 @@ void Routine::WakeUpOn(int tpid)
     fprintf(stderr, "This go-routine is a new one, cannot add to its current scheduler\n");
     return;
   }
-  if (!g_schedulers[tpid - 1]) {
+  if (tpid > 0 && !g_schedulers[tpid - 1]) {
     fprintf(stderr, "Thread id %d has not initialized\n", tpid);
     std::abort();
   }
@@ -84,6 +89,11 @@ Scheduler *Scheduler::Current()
   return res;
 }
 
+int Scheduler::CurrentThreadPoolId()
+{
+  return tls_thread_pool_id;
+}
+
 void Scheduler::RegisterScheduler(int tpid)
 {
   tls_thread_pool_id = tpid;
@@ -96,9 +106,14 @@ void Scheduler::UnRegisterScheduler()
   g_schedulers[tls_thread_pool_id - 1] = nullptr;
 }
 
-void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
+Scheduler *GetSchedulerFromPool(int thread_id)
 {
-  fprintf(stderr, "RunNext() on thread %d\n", tls_thread_pool_id);
+  return g_schedulers[thread_id - 1];
+}
+
+void Scheduler::RunNext(State state, Queue *sleep_q, OptionalMutex *sleep_lock)
+{
+  // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
   std::unique_lock<std::mutex> l(mutex);
 
   CollectGarbage();
@@ -110,31 +125,34 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   } else {
     if (state == SleepState) {
       old->Add(sleep_q->prev);
-      sleep_lock->unlock();
+      if (sleep_lock)
+	sleep_lock->unlock();
     } else if (state == ReadyState) {
       old->Add(ready_q.prev);
     } else if (state == ExitState) {
       resp_count--;
       delay_garbage = old;
     }
-    old_ctx = &old->ctx;
+    old_ctx = old->ctx;
   }
 
   current = nullptr;
 
 again:
   auto ent = ready_q.next;
+  // fprintf(stderr, "%p head %p...\n", this, ent);
 
   if (ent != &ready_q) {
     current = (Routine *) ent;
-    if (!current->ctx.uc_stack.ss_sp)
+    if (!current->ctx)
       current->InitStack(&host_ctx, Routine::kStackSize);
     current->Detach();
-    current_ctx = &current->ctx;
+    current_ctx = current->ctx;
   } else if (g_thread_pool_should_exit && resp_count == 0) {
+    // fprintf(stderr, "%p exiting\n", this);
     current_ctx = &host_ctx;
   } else {
-    // fprintf(stderr, "no routine, wait. thread id %d\n", tls_thread_pool_id);
+    // fprintf(stderr, "%p no routine, wait. thread id %d. resp_count %d\n", this, tls_thread_pool_id, resp_count);
     cond.wait(l);
     goto again;
   }
@@ -144,7 +162,7 @@ again:
     swapcontext(old_ctx, current_ctx);
 }
 
-void Scheduler::WakeUp(Routine *r)
+void Scheduler::WakeUp(Routine *r, bool batch)
 {
   std::unique_lock<std::mutex> l1, l2;
   if (r->sched != this && r->sched != nullptr) {
@@ -166,14 +184,20 @@ void Scheduler::WakeUp(Routine *r)
   r->sched = this;
   resp_count++;
   // fprintf(stderr, "%p scheduler notified\n", this);
-  cond.notify_one();
+  if (!batch || resp_count > 1024)
+    cond.notify_one();
 }
 
 void Scheduler::CollectGarbage()
 {
   if (delay_garbage) {
-    free(delay_garbage->ctx.uc_stack.ss_sp);
-    delete delay_garbage;
+    if (delay_garbage->ctx) {
+      free(delay_garbage->ctx->uc_stack.ss_sp);
+      free(delay_garbage->ctx);
+      delay_garbage->ctx = nullptr;
+    }
+    if (!delay_garbage->reuse)
+      delete delay_garbage;
   }
   delay_garbage = nullptr;
 }
@@ -185,7 +209,13 @@ void InitThreadPool(int nr_threads)
   std::atomic<int> nr_up(0);
   g_schedulers.resize(nr_threads, nullptr);
   for (int i = 0; i < nr_threads; i++) {
-    g_thread_pool.emplace_back(std::move(std::thread([&nr_up, i]{
+    g_thread_pool.emplace_back(std::move(std::thread([&nr_up, i] {
+	    // linux only
+	    cpu_set_t set;
+	    CPU_ZERO(&set);
+	    CPU_SET(i % sysconf(_SC_NPROCESSORS_CONF), &set);
+	    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
+
 	    Scheduler::RegisterScheduler(i + 1);
 	    nr_up.fetch_add(1);
 	    Scheduler::Current()->RunNext(Scheduler::ExitState);
@@ -193,6 +223,15 @@ void InitThreadPool(int nr_threads)
 	  })));
   }
   while (nr_up.load() < nr_threads);
+}
+
+void RunOnMainThread()
+{
+  g_schedulers.push_back(nullptr);
+  g_thread_pool_should_exit = true;
+  Scheduler::RegisterScheduler(1);
+  Scheduler::Current()->RunNext(Scheduler::ExitState);
+  Scheduler::Current()->CollectGarbage();
 }
 
 void WaitThreadPool()
@@ -206,14 +245,15 @@ void WaitThreadPool()
   }
 }
 
-void SourceConditionVariable::WaitForSize(size_t size, std::mutex *lock)
+void SourceConditionVariable::WaitForSize(size_t size, OptionalMutex *lock)
 {
   auto sched = Scheduler::Current();
   cap += size;
   sched->current_routine()->set_wait_for_delta(size);
   sched->RunNext(Scheduler::SleepState, &sleep_q, lock);
   cap -= size;
-  lock->lock();
+  if (lock)
+    lock->lock();
 }
 
 void SourceConditionVariable::Notify(size_t new_cap)
