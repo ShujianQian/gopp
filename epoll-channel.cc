@@ -59,6 +59,8 @@ uint8_t *IOBuffer::AllocBuffer()
   if (p) {
     auto next = *(uintptr_t *) prealloc_head;
     prealloc_head = (uint8_t *) next;
+
+    *(uintptr_t *) p = 0xdeadbeef;
     return p;
   } else {
     return (uint8_t *) malloc(kBufferPageSize);
@@ -69,7 +71,7 @@ void IOBuffer::FreeBuffer(uint8_t *ptr)
 {
   if (ptr >= prealloc_data && ptr < prealloc_data + prealloc_len) {
     *(uintptr_t *) ptr = (uintptr_t) prealloc_head;
-      prealloc_head = ptr;
+    prealloc_head = ptr;
   } else {
     free(ptr);
   }
@@ -146,17 +148,17 @@ void IOBuffer::Read(int fd, size_t max_len)
     left -= to_copy;
     iovcnt++;
   }
-  again = false;
   auto rs = readv(fd, iov, iovcnt);
   if (rs < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
     rs = 0;
     again = true;
   } else if (rs == 0) {
     eof = true;
+    again = false;
   }
 
   if (rs < 0) {
-    perror("reav");
+    perror("readv");
     return;
   }
 
@@ -169,7 +171,7 @@ void IOBuffer::Read(int fd, size_t max_len)
     }
 
     if (left > rs) {
-      remain = (remain - rs - kBufferPageSize) % kBufferPageSize + kBufferPageSize;
+      remain = left - rs;
       for (int j = i + 1; j < iovcnt; j++) {
 	FreeBuffer((uint8_t *) iov[j].iov_base);
       }
@@ -264,6 +266,8 @@ void EpollThread::ModifyWatchEvent(EpollSocketBase *data, uint32_t new_events)
     if (epoll_ctl(fd, EPOLL_CTL_MOD, data->fd, &event) < 0) {
       goto fail;
     }
+  } else {
+    // fprintf(stderr, "epoll skipped fd %d %d\n", data->fd, new_events);
   }
   data->events = new_events;
   return;
@@ -349,20 +353,26 @@ void InputSocketChannelBase::More(int amount)
 {
   size_t max_len = limit == 0 ? read_cv.capacity() + amount : limit - q.size();
   bool last_again = q.is_again();
-  // fprintf(stderr, "before qsize %lu\n", q.size());
+  // fprintf(stderr, "In::More() on %p amt %d\n", sock, amount);
 
   if (max_len == 0) {
     sock->UnWatchRead();
     return;
   }
   q.Read(sock->file_desc(), max_len);
+
   if (q.is_eof()) {
     sock->UnWatchRead();
     read_cv.Notify(read_cv.capacity());
   } else {
     read_cv.Notify(q.size());
-    if (last_again && !q.is_again()) { sock->UnWatchRead(); /* fprintf(stderr, "unwatching read\n"); */ }
-    else if (!last_again && q.is_again()) { sock->WatchRead(); /* fprintf(stderr, "watching read\n"); */ }
+    if (last_again && !q.is_again()) {
+      sock->UnWatchRead();
+      /* fprintf(stderr, "unwatching read %p\n", sock); */
+    } else if (!last_again && q.is_again()) {
+      sock->WatchRead();
+      /* fprintf(stderr, "watching read %p\n", sock); */
+    }
   }
   // fprintf(stderr, "qsize %lu amt %d again %d\n", q.size(), amount, q.is_again());
 }
@@ -417,8 +427,13 @@ void OutputSocketChannelBase::More(int amount)
   } else {
     write_cv.Notify(limit - q.size());
   }
-  if (last_again && !q.is_again()) { sock->UnWatchWrite(); fprintf(stderr, "unwatching write...\n"); }
-  else if (!last_again && q.is_again()) { sock->WatchWrite(); fprintf(stderr, "watching write...\n"); }
+  if (last_again && !q.is_again()) {
+    sock->UnWatchWrite();
+    /* fprintf(stderr, "unwatching write... %p\n", sock); */
+  } else if (!last_again && q.is_again()) {
+    sock->WatchWrite();
+    /* fprintf(stderr, "watching write... %p\n", sock); */
+  }
 }
 
 static EpollThread *g_poll;

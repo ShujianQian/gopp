@@ -43,7 +43,6 @@ struct ScheduleEntity {
 };
 
 class Routine;
-class OptionalMutex;
 
 class Scheduler {
 public:
@@ -74,7 +73,7 @@ public:
     SleepState,
     ExitState,
   };
-  void RunNext(State state, Queue *q = nullptr, OptionalMutex *sleep_lock = nullptr);
+  void RunNext(State state, Queue *q = nullptr, std::mutex *sleep_lock = nullptr);
   void BottomHalf(Routine *r);
   void CollectGarbage();
   void WakeUp(Routine *r, bool batch = false);
@@ -176,42 +175,20 @@ public:
   WaitSlot(const WaitSlot &rhs) = delete;
   WaitSlot(WaitSlot &&rhs) = delete;
 
-  void WaitForSize(size_t size, OptionalMutex *lock);
+  void WaitForSize(size_t size, std::mutex *lock);
   void Notify(size_t new_cap);
 
   size_t capacity() const { return cap; }
 };
 
-class OptionalMutex {
-  std::mutex m;
-  bool enabled = true;
-public:
-  void lock() {
-    if (enabled) m.lock();
-  }
-  void unlock() {
-    if (enabled) m.unlock();
-  }
-  bool try_lock() {
-    if (enabled) return m.try_lock();
-    return true;
-  }
-  OptionalMutex *mutex_ptr() {
-    if (enabled) return this;
-    else return nullptr;
-  }
-  void Enable() { enabled = true; }
-  void Disable() { enabled = false; }
-};
-
 class WaitBarrier {
-  OptionalMutex m;
+  std::mutex m;
   long counter;
   WaitSlot slot;
 public:
   WaitBarrier(long max_waiter) : counter(max_waiter) {}
   void Wait() {
-    std::lock_guard<OptionalMutex> _(m);
+    std::lock_guard<std::mutex> _(m);
     if (--counter == 0) {
       slot.Notify(0);
     } else {
@@ -258,13 +235,11 @@ template <typename T, class Container, class BaseClass>
 class BaseBufferChannel : public BaseClass {
   WaitSlot read_cv, write_cv;
   Container queue;
-  OptionalMutex mutex;
+  std::mutex mutex;
   size_t limit;
   bool closed;
 public:
   BaseBufferChannel(size_t lmt) : limit(lmt), closed(false) {}
-
-  OptionalMutex &buffer_mutex() { return mutex; }
 
   bool AcquireReadSpace(size_t size) {
     if (size > limit && limit > 0) {
@@ -273,7 +248,7 @@ public:
     mutex.lock();
     while (queue.size() < size) {
       if (closed) return false;
-      read_cv.WaitForSize(size, mutex.mutex_ptr());
+      read_cv.WaitForSize(size, &mutex);
     }
     return true;
   }
@@ -285,14 +260,14 @@ public:
     mutex.lock();
     if (limit > 0) {
       while (limit - queue.size() < size)
-	write_cv.WaitForSize(size, mutex.mutex_ptr());
+	write_cv.WaitForSize(size, &mutex);
     }
   }
   void EndRead(size_t size) { mutex.unlock(); }
   void EndWrite(size_t size) {
     if (limit == 0) {
       // synchronous
-      write_cv.WaitForSize(size, mutex.mutex_ptr());
+      write_cv.WaitForSize(size, &mutex);
     }
     mutex.unlock();
   }
@@ -319,14 +294,14 @@ public:
 
   void Flush() {
     if (limit > 0) {
-      std::lock_guard<OptionalMutex> _(mutex);
+      std::lock_guard<std::mutex> _(mutex);
       while (!queue.empty())
-	write_cv.WaitForSize(0, mutex.mutex_ptr());
+	write_cv.WaitForSize(0, &mutex);
     }
   }
 
   void Close() {
-    std::lock_guard<OptionalMutex> _(mutex);
+    std::lock_guard<std::mutex> _(mutex);
     closed = true;
     read_cv.Notify(LONG_MAX);
   }

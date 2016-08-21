@@ -131,7 +131,7 @@ public:
 
 class InputSocketChannelBase {
 protected:
-  OptionalMutex mutex;
+  std::mutex mutex;
   IOBuffer q;
   size_t limit;
   EpollSocketBase *sock;
@@ -143,11 +143,10 @@ public:
   InputSocketChannelBase(size_t lmt) : limit(lmt), q(lmt) {}
   void More(int amount);
   void NotifyMoreIO() {
-    // fprintf(stderr, "notify more io\n");
-    std::unique_lock<OptionalMutex> _(mutex);
+    // fprintf(stderr, "notify more io on %p\n", sock);
+    std::unique_lock<std::mutex> _(mutex);
     read_cv.Notify(read_cv.capacity());
   }
-  OptionalMutex &buffer_mutex() { return mutex; }
 };
 
 template <class BaseClass = DummyChannel>
@@ -156,12 +155,15 @@ public:
   using InputSocketChannelBase::InputSocketChannelBase;
 
   bool AcquireReadSpace(size_t size) {
+    if (size > limit) std::abort();
     mutex.lock();
     while (q.size() < size) {
       More(size);
       if (q.size() >= size) break;
       if (q.is_eof()) return false;
-      read_cv.WaitForSize(size, mutex.mutex_ptr());
+      if (!q.is_again()) continue;
+
+      read_cv.WaitForSize(size, &mutex);
     }
     return true;
   }
@@ -199,7 +201,7 @@ public:
     while (q.size() < size * sizeof(int)) {
       if (q.is_eof()) return false;
       sock->WatchRead();
-      read_cv.WaitForSize(size * sizeof(int), mutex.mutex_ptr());
+      read_cv.WaitForSize(size * sizeof(int), &mutex);
     }
     return true;
   }
@@ -224,7 +226,7 @@ typedef InputChannelWrapper<int, AcceptSocketChannelImpl<DummyChannel> > AcceptS
 
 class OutputSocketChannelBase {
 protected:
-  OptionalMutex mutex;
+  std::mutex mutex;
   WaitSlot write_cv;
   IOBuffer q;
   size_t limit;
@@ -240,11 +242,9 @@ public:
 
   void More(int amount);
   void NotifyMoreIO() {
-    std::lock_guard<OptionalMutex> _(mutex);
+    std::lock_guard<std::mutex> _(mutex);
     write_cv.Notify(write_cv.capacity());
   }
-
-  OptionalMutex &buffer_mutex() { return mutex; }
 };
 
 template <class BaseClass = DummyChannel>
@@ -259,13 +259,15 @@ public:
 	More(size);
 	if (limit - q.size() >= size) break;
 	if (q.is_eof()) break;
-	write_cv.WaitForSize(size, mutex.mutex_ptr());
+	if (!q.is_again()) continue;
+
+	write_cv.WaitForSize(size, &mutex);
       }
     }
   }
   void EndWrite(size_t size) {
     if (limit == 0 && !q.is_eof()) {
-      write_cv.WaitForSize(size, mutex.mutex_ptr());
+      write_cv.WaitForSize(size, &mutex);
     }
     sock->WatchWrite();
     mutex.unlock();
@@ -277,16 +279,17 @@ public:
     q.PushBack(buf, cnt);
   }
   void Close() {
-    std::lock_guard<OptionalMutex> _(mutex);
+    std::lock_guard<std::mutex> _(mutex);
     q.set_eof();
   }
   void Flush() {
     if (limit > 0) {
-      std::lock_guard<OptionalMutex> _(mutex);
+      std::lock_guard<std::mutex> _(mutex);
       while (!q.is_empty() && !q.is_eof()) {
 	More(q.size());
 	if (q.is_empty() || q.is_eof()) break;
-	write_cv.WaitForSize(0, mutex.mutex_ptr());
+	if (!q.is_again()) continue;
+	write_cv.WaitForSize(0, &mutex);
       }
     }
   }

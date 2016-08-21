@@ -79,6 +79,7 @@ void Routine::WakeUpOn(int tpid)
     gl.unlock();
 
     for (int i = 1; i < g_schedulers.size(); i++) {
+      // fprintf(stderr, "notify share\n");
       std::lock_guard<std::mutex> _(g_schedulers[i]->mutex);
       g_schedulers[i]->cond.notify_one();
     }
@@ -152,7 +153,7 @@ void Scheduler::Init(Routine *r)
   idle->sched = this;
 }
 
-void Scheduler::RunNext(State state, Queue *sleep_q, OptionalMutex *sleep_lock)
+void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
 {
   // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
   std::unique_lock<std::mutex> l(mutex);
@@ -223,11 +224,11 @@ again:
     }
 
     gl.unlock();
-    timeval s; gettimeofday(&s, NULL);
+    // timeval s; gettimeofday(&s, NULL);
     cond.wait(l);
-    timeval e; gettimeofday(&e, NULL);
-    fprintf(stderr, "%d waited for %lu ms\n", tls_thread_pool_id,
-	    (e.tv_sec - s.tv_sec) * 1000 + (e.tv_usec - s.tv_usec) / 1000);
+    // timeval e; gettimeofday(&e, NULL);
+    // fprintf(stderr, "%d waited for %lu ms\n", tls_thread_pool_id,
+    // (e.tv_sec - s.tv_sec) * 1000 + (e.tv_usec - s.tv_usec) / 1000);
 
     goto again;
   }
@@ -265,10 +266,10 @@ void Scheduler::WakeUp(Routine *r, bool batch)
   else
     r->Add(ready_q.prev);
 
-  if (r->sched) {
-    if (r->sched != this)
-      std::lock_guard<std::mutex> _(r->sched->mutex);
-      r->sched->cond.notify_one();
+  if (r->sched && r->sched != this) {
+    std::abort();
+    std::lock_guard<std::mutex> _(r->sched->mutex);
+    r->sched->cond.notify_one();
   }
   r->sched = this;
   if (!batch) {
@@ -368,7 +369,7 @@ void WaitThreadPool()
   }
 }
 
-void WaitSlot::WaitForSize(size_t size, OptionalMutex *lock)
+void WaitSlot::WaitForSize(size_t size, std::mutex *lock)
 {
   auto sched = Scheduler::Current();
   cap += size;
