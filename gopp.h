@@ -17,7 +17,7 @@
 
 #include <x86intrin.h>
 
-#include "ucontext.h"
+#include "amd64-ucontext.h"
 
 namespace go {
 
@@ -187,11 +187,32 @@ class WaitBarrier {
   WaitSlot slot;
 public:
   WaitBarrier(long max_waiter) : counter(max_waiter) {}
+  void Adjust(long max_waiter) { counter = max_waiter; }
   void Wait() {
     std::lock_guard<std::mutex> _(m);
     if (--counter == 0) {
       slot.Notify(0);
     } else {
+      slot.WaitForSize(0, &m);
+    }
+  }
+};
+
+class AsyncWaitBarrier {
+  std::mutex m;
+  long counter;
+  WaitSlot slot;
+public:
+  AsyncWaitBarrier(long max_waiter) : counter(max_waiter) {}
+  void Complete() {
+    std::lock_guard<std::mutex> _(m);
+    if (--counter == 0) {
+      slot.Notify(0);
+    }
+  }
+  void Wait() {
+    std::lock_guard<std::mutex> _(m);
+    if (counter > 0) {
       slot.WaitForSize(0, &m);
     }
   }
