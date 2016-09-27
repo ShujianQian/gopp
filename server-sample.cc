@@ -39,7 +39,9 @@ public:
     new go::EpollSocketBase(fd, poll, ch);
     while (true) {
       bool eof = false;
+      fprintf(stderr, "server reading fd\n");
       int client_fd = ch->Read(eof);
+
       if (eof) {
 	fprintf(stderr, "server socket accidentially closed\n");
 	std::abort();

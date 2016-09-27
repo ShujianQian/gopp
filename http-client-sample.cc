@@ -33,14 +33,14 @@ int main(int argc, char *argv[])
     perror("connect");
     std::abort();
   }
+  std::mutex finish_lock;
+  finish_lock.lock();
 
-  auto r = go::Make([fd] {
+  auto r = go::Make([fd, &finish_lock] {
       auto sock = new go::EpollSocket(fd, go::GlobalEpoll(),
 				      new go::InputSocketChannel(4096),
 				      new go::OutputSocketChannel(4096));
       auto out = sock->output_channel();
-      out->buffer_mutex().Disable();
-      sock->input_channel()->buffer_mutex().Disable();
       std::stringstream ss;
       ss << "GET / HTTP/1.0\r\n\r\n";
       out->Write(ss.str().c_str(), ss.str().length());
@@ -50,6 +50,7 @@ int main(int argc, char *argv[])
       while (sock->input_channel()->Read(&ch)) {
 	putchar(ch);
       }
+      finish_lock.unlock();
     });
   r->StartOn(1);
 
@@ -58,6 +59,7 @@ int main(int argc, char *argv[])
     });
   t.detach();
 
+  finish_lock.lock();
   go::WaitThreadPool();
   return 0;
 }

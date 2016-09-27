@@ -143,7 +143,7 @@ public:
   InputSocketChannelBase(size_t lmt) : limit(lmt), q(lmt) {}
   void More(int amount);
   void NotifyMoreIO() {
-    // fprintf(stderr, "notify more io on %p\n", sock);
+    // fprintf(stderr, "notify more io on %p(%d)\n", sock, sock->file_desc());
     std::unique_lock<std::mutex> _(mutex);
     read_cv.Notify(read_cv.capacity());
   }
@@ -160,7 +160,10 @@ public:
     while (q.size() < size) {
       More(size);
       if (q.size() >= size) break;
-      if (q.is_eof()) return false;
+      if (q.is_eof()) {
+	mutex.unlock();
+	return false;
+      }
       if (!q.is_again()) continue;
 
       read_cv.WaitForSize(size, &mutex);
@@ -199,16 +202,18 @@ public:
   bool AcquireReadSpace(size_t size) {
     mutex.lock();
     while (q.size() < size * sizeof(int)) {
-      if (q.is_eof()) return false;
-      sock->WatchRead();
+      More(size * sizeof(int));
+      if (q.size() >= size * sizeof(int)) break;
+      if (q.is_eof()) {
+	mutex.unlock();
+	return false;
+      }
+      if (!q.is_again()) continue;
       read_cv.WaitForSize(size * sizeof(int), &mutex);
     }
     return true;
   }
   void EndRead(size_t size) {
-    if (read_cv.capacity() == 0) {
-      sock->UnWatchRead();
-    }
     mutex.unlock();
   }
   int ReadOne() {

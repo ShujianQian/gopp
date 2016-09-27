@@ -39,6 +39,7 @@ void IOBuffer::PreAllocBuffers(size_t sz)
 				   | MAP_HUGETLB | MAP_POPULATE,
 				   -1, 0);
   if (prealloc_data == (void *) -1) {
+    fprintf(stderr, "prealloc_len = %lu\n", prealloc_len);
     perror("mmap");
     std::abort();
   }
@@ -170,8 +171,9 @@ void IOBuffer::Read(int fd, size_t max_len)
       nr_pages++;
     }
 
-    if (left > rs) {
-      remain = left - rs;
+    if (left >= rs) {
+      // remain = kBufferPageSize - iov[i].iov_len + left - rs;
+      remain = (remain - rs + kBufferPageSize - 1) % kBufferPageSize + 1;
       for (int j = i + 1; j < iovcnt; j++) {
 	FreeBuffer((uint8_t *) iov[j].iov_base);
       }
@@ -227,7 +229,7 @@ void IOBuffer::Write(int fd, size_t max_len)
   for (int i = 0; i < iovcnt; i++) {
     left += iov[i].iov_len;
     if (left >= rs) {
-      offset = (offset + rs + kBufferPageSize - 1) % kBufferPageSize + 1;
+      offset = (offset + rs + kBufferPageSize) % kBufferPageSize;
       break;
     } else {
       buffer_pages.pop_front();
