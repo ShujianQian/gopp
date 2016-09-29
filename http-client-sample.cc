@@ -19,6 +19,11 @@ int main(int argc, char *argv[])
   go::CreateGlobalEpoll();
 
   std::stringstream ss;
+  std::string url("/");
+
+  if (argc >= 2) {
+    url = std::string(argv[1]);
+  }
 
   int fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -36,13 +41,13 @@ int main(int argc, char *argv[])
   std::mutex finish_lock;
   finish_lock.lock();
 
-  auto r = go::Make([fd, &finish_lock] {
+  auto r = go::Make([fd, &finish_lock, url] {
       auto sock = new go::EpollSocket(fd, go::GlobalEpoll(),
 				      new go::InputSocketChannel(4096),
 				      new go::OutputSocketChannel(4096));
       auto out = sock->output_channel();
       std::stringstream ss;
-      ss << "GET / HTTP/1.0\r\n\r\n";
+      ss << "GET " << url << " HTTP/1.0\r\n\r\n";
       out->Write(ss.str().c_str(), ss.str().length());
       out->Flush();
       puts("Request sent");

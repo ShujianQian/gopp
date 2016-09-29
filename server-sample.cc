@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <fcntl.h>
+#include <sstream>
 
 #include "gopp.h"
 #include "epoll-channel.h"
@@ -13,9 +14,34 @@ class Connection : public go::Routine {
 public:
   Connection(go::EpollSocket *s) : sock(s) {};
 
+  void ServeFile(std::string filename) {
+    std::stringstream ss;
+    auto out = sock->output_channel();
+    int fd_file = open(filename.c_str(), O_RDONLY);
+    if (fd_file < 0) {
+      goto error;
+    }
+    uint8_t buf[4096];
+    while (true) {
+      int rs = read(fd_file, buf, 4096);
+      if (rs < 0) {
+	goto error;
+      } else if (rs == 0) {
+	out->Flush();
+	return;
+      }
+      out->Write(buf, rs);
+    }
+  error:
+    ss << "fail to read file " << filename;
+    out->Write(ss.str().c_str(), ss.str().length());
+    if (fd_file > 0) close(fd_file);
+  }
+
   virtual void Run() {
     fprintf(stderr, "New Client\n");
     auto in = sock->input_channel();
+    std::stringstream filename;
     while (true) {
       uint8_t ch;
       if (!in->Read(&ch)) {
@@ -23,7 +49,12 @@ public:
 	close(sock->file_desc());
 	return;
       }
-      putchar(ch);
+      if (ch == '\n') {
+	ServeFile(filename.str());
+	filename.clear();
+      } else {
+	filename << ch;
+      }
     }
     fprintf(stderr, "Done with this client\n");
   }
@@ -48,7 +79,9 @@ public:
       }
       fprintf(stderr, "got new client %d\n", client_fd);
 
-      auto sock = new go::EpollSocket(client_fd, poll, new go::InputSocketChannel(10));
+      auto sock = new go::EpollSocket(client_fd, poll,
+				      new go::InputSocketChannel(10),
+				      new go::OutputSocketChannel(4096));
       auto client_routine = new Connection(sock);
       client_routine->StartOn(1);
     }

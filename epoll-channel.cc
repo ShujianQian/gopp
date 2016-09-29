@@ -166,16 +166,23 @@ void IOBuffer::Read(int fd, size_t max_len)
   left = 0;
   for (int i = 0; i < iovcnt; i++) {
     left += iov[i].iov_len;
+
     if (i > 0) {
+      remain = kBufferPageSize;
       buffer_pages.push_back((uint8_t *) iov[i].iov_base);
       nr_pages++;
     }
+    remain -= iov[i].iov_len;
 
     if (left >= rs) {
-      // remain = kBufferPageSize - iov[i].iov_len + left - rs;
-      remain = (remain - rs + kBufferPageSize - 1) % kBufferPageSize + 1;
+      remain += left - rs;
       for (int j = i + 1; j < iovcnt; j++) {
 	FreeBuffer((uint8_t *) iov[j].iov_base);
+      }
+      if (remain == 0) {
+	remain = kBufferPageSize;
+	buffer_pages.push_back(AllocBuffer());
+	nr_pages++;
       }
       break;
     }
@@ -228,12 +235,20 @@ void IOBuffer::Write(int fd, size_t max_len)
   left = 0;
   for (int i = 0; i < iovcnt; i++) {
     left += iov[i].iov_len;
+    if (i > 0) offset = 0;
+    offset += iov[i].iov_len;
     if (left >= rs) {
-      offset = (offset + rs + kBufferPageSize) % kBufferPageSize;
+      offset -= left - rs;
+      if (offset == kBufferPageSize) {
+	i++;
+	offset = 0;
+      }
+      for (int j = 0; j < i; j++) {
+	FreeBuffer(buffer_pages.front());
+	buffer_pages.pop_front();
+	nr_pages--;
+      }
       break;
-    } else {
-      buffer_pages.pop_front();
-      nr_pages--;
     }
   }
 }
