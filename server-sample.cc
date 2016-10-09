@@ -33,6 +33,7 @@ public:
       out->Write(buf, rs);
     }
   error:
+    fprintf(stderr, "error occured\n");
     ss << "fail to read file " << filename;
     out->Write(ss.str().c_str(), ss.str().length());
     if (fd_file > 0) close(fd_file);
@@ -81,7 +82,7 @@ public:
 
       auto sock = new go::EpollSocket(client_fd, poll,
 				      new go::InputSocketChannel(10),
-				      new go::OutputSocketChannel(4096));
+				      new go::OutputSocketChannel(4097));
       auto client_routine = new Connection(sock);
       client_routine->StartOn(1);
     }

@@ -155,7 +155,9 @@ public:
   using InputSocketChannelBase::InputSocketChannelBase;
 
   bool AcquireReadSpace(size_t size) {
-    if (size > limit) std::abort();
+    if (size > limit) {
+      throw std::invalid_argument("size larger than limit");
+    }
     mutex.lock();
     while (q.size() < size) {
       More(size);
@@ -200,6 +202,8 @@ public:
   using AcceptSocketChannelBase::AcceptSocketChannelBase;
 
   bool AcquireReadSpace(size_t size) {
+    if (size > limit)
+      throw std::invalid_argument("size larger than limit");
     mutex.lock();
     while (q.size() < size * sizeof(int)) {
       More(size * sizeof(int));
@@ -258,6 +262,8 @@ public:
   using OutputSocketChannelBase::OutputSocketChannelBase;
 
   void AcquireWriteSpace(size_t size) {
+    if (size > limit)
+      throw std::invalid_argument("size larger than limit");
     mutex.lock();
     if (limit > 0) {
       while (limit - q.size() < size && !q.is_eof()) {

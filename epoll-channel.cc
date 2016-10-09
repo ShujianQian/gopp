@@ -446,10 +446,10 @@ void OutputSocketChannelBase::More(int amount)
   }
   if (last_again && !q.is_again()) {
     sock->UnWatchWrite();
-    /* fprintf(stderr, "unwatching write... %p\n", sock); */
+    fprintf(stderr, "unwatching write... %p\n", sock);
   } else if (!last_again && q.is_again()) {
     sock->WatchWrite();
-    /* fprintf(stderr, "watching write... %p\n", sock); */
+    fprintf(stderr, "watching write... %p\n", sock);
   }
 }
 
