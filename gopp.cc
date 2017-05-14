@@ -11,6 +11,11 @@
 
 #include <sys/time.h>
 
+extern "C" {
+void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom, size_t size);
+void __sanitizer_finish_switch_fiber(void *fake_stack_save);
+}
+
 namespace go {
 
 void Routine::Run0()
@@ -232,7 +237,9 @@ again:
 
     goto again;
   }
+
 done:
+  void *fake_stack = NULL;
   next_ctx = next->ctx;
   current = next;
   l.unlock();
