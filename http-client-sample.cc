@@ -2,6 +2,7 @@
 #include <cstring>
 #include <unistd.h>
 
+#include <string>
 #include <sstream>
 #include <thread>
 
@@ -29,7 +30,7 @@ int main(int argc, char *argv[])
 
   struct sockaddr_in sock_addr;
   memset(&sock_addr, 0, sizeof(struct sockaddr_in));
-  sock_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  sock_addr.sin_addr.s_addr = inet_addr("142.150.234.190");
   sock_addr.sin_family = AF_INET;
   sock_addr.sin_port = htons(8000);
 
@@ -43,18 +44,30 @@ int main(int argc, char *argv[])
 
   auto r = go::Make([fd, &finish_lock, url] {
       auto sock = new go::EpollSocket(fd, go::GlobalEpoll(),
-				      new go::InputSocketChannel(4096),
+				      new go::InputSocketChannel(2 << 20),
 				      new go::OutputSocketChannel(4096));
       auto out = sock->output_channel();
       std::stringstream ss;
       ss << "GET " << url << " HTTP/1.0\r\n\r\n";
       out->Write(ss.str().c_str(), ss.str().length());
       out->Flush();
-      puts("Request sent");
+      // puts("Request sent");
       uint8_t ch = 0;
+      std::string line;
       while (sock->input_channel()->Read(&ch)) {
-	putchar(ch);
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+          fprintf(stderr, "%s\n", line.c_str());
+          if (line.length() == 0) break;
+          line = "";
+          continue;
+        }
+        line += ch;
       }
+
+      while (sock->input_channel()->Read(&ch))
+        putchar(ch);
+
       finish_lock.unlock();
     });
   r->StartOn(1);
