@@ -144,6 +144,7 @@ struct ucontext {
 
   struct ucontext *uc_link;
   stack_t	uc_stack;
+  void         *asan_fake_stack;
   int		__spare__[8];
 };
 
@@ -166,7 +167,7 @@ static inline void makecontext(ucontext_t *ucp, void (*func)(void *), void *ptr)
 
 static inline int swapcontext(ucontext_t *oucp, const ucontext_t *ucp)
 {
-  if(getmcontext(&oucp->uc_mcontext) == 0)
+  if (getmcontext(&oucp->uc_mcontext) == 0)
     setmcontext(&ucp->uc_mcontext);
   return 0;
 }

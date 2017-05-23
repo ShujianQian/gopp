@@ -1,83 +1,79 @@
 #include <cstdio>
 #include <cstring>
-#include <unistd.h>
-
 #include <string>
 #include <sstream>
-#include <thread>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/eventfd.h>
 
 #include "gopp.h"
-#include "epoll-channel.h"
+#include "channels.h"
+
+class HttpClient : public go::Routine {
+  std::string host;
+  int port;
+ public:
+  HttpClient(std::string host, int port) : host(host), port(port) {}
+  void Run() final;
+};
+
+static int done = eventfd(0, EFD_SEMAPHORE);
+
+void HttpClient::Run()
+{
+  auto *socket = new go::TcpSocket(256 << 20, 256 << 10);
+  if (!socket->Pin()) {
+    fprintf(stderr, "Cannot pin\n");
+  }
+  socket->Connect(host, port);
+  auto *input = socket->input_channel();
+  auto *output = socket->output_channel();
+  FILE *fp = fopen("dump", "w");
+
+  std::stringstream ss;
+
+  ss << "GET /test/8/dolly-net.0.dump HTTP/1.0\r\n\r\n";
+
+  output->Write(ss.str().c_str(), ss.str().length());
+  output->Flush();
+
+  int lcnt = 0;
+  bool content_mode = false;
+  while (true) {
+    char ch;
+    if (!input->Read(&ch, 1)) {
+      break;
+    }
+
+    if (content_mode) {
+      fputc(ch, fp);
+      continue;
+    }
+    if (ch == '\r') {
+      continue;
+    } else if (ch == '\n') {
+      if (lcnt == 0) content_mode = true;
+      lcnt = 0;
+      putchar(ch);
+      continue;
+    } else {
+      lcnt++;
+      putchar(ch);
+    }
+  }
+
+  fclose(fp);
+  socket->Close();
+  delete socket;
+  uint64_t u = 1;
+  ::write(done, &u, sizeof(uint64_t));
+}
 
 int main(int argc, char *argv[])
 {
-  go::InitThreadPool();
-  go::CreateGlobalEpoll();
-
-  std::stringstream ss;
-  std::string url("/");
-
-  if (argc >= 2) {
-    url = std::string(argv[1]);
-  }
-
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-
-  struct sockaddr_in sock_addr;
-  memset(&sock_addr, 0, sizeof(struct sockaddr_in));
-  sock_addr.sin_addr.s_addr = inet_addr("142.150.234.190");
-  sock_addr.sin_family = AF_INET;
-  sock_addr.sin_port = htons(8000);
-
-  if (connect(fd, (struct sockaddr *) &sock_addr,
-	      sizeof(struct sockaddr_in)) < 0) {
-    perror("connect");
-    std::abort();
-  }
-  std::mutex finish_lock;
-  finish_lock.lock();
-
-  auto r = go::Make([fd, &finish_lock, url] {
-      auto sock = new go::EpollSocket(fd, go::GlobalEpoll(),
-				      new go::InputSocketChannel(2 << 20),
-				      new go::OutputSocketChannel(4096));
-      auto out = sock->output_channel();
-      std::stringstream ss;
-      ss << "GET " << url << " HTTP/1.0\r\n\r\n";
-      out->Write(ss.str().c_str(), ss.str().length());
-      out->Flush();
-      // puts("Request sent");
-      uint8_t ch = 0;
-      std::string line;
-      while (sock->input_channel()->Read(&ch)) {
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-          fprintf(stderr, "%s\n", line.c_str());
-          if (line.length() == 0) break;
-          line = "";
-          continue;
-        }
-        line += ch;
-      }
-
-      while (sock->input_channel()->Read(&ch))
-        putchar(ch);
-
-      finish_lock.unlock();
-    });
-  r->StartOn(1);
-
-  auto t = std::thread([]{
-      go::GlobalEpoll()->EventLoop();
-    });
-  t.detach();
-
-  finish_lock.lock();
+  go::InitThreadPool(1);
+  go::GetSchedulerFromPool(1)->WakeUp(new HttpClient(argv[1], atoi(argv[2])));
+  uint64_t u = 0;
+  ::read(done, &u, sizeof(uint64_t));
   go::WaitThreadPool();
   return 0;
 }

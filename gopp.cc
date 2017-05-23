@@ -8,19 +8,51 @@
 #include <cstdarg>
 #include <atomic>
 #include <thread>
-
+#include <sys/eventfd.h>
+#include <sys/epoll.h>
 #include <sys/time.h>
 
+#include "channels.h"
+
+#if __has_feature(address_sanitizer)
+
 extern "C" {
-void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom, size_t size);
-void __sanitizer_finish_switch_fiber(void *fake_stack_save);
+  void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom, size_t size);
+  void __sanitizer_finish_switch_fiber(void *fake_stack_save, const void **bottom_old, size_t *old);
 }
+
+#endif
 
 namespace go {
 
+class ScheduleEventSource : public EventSource {
+  int fd; // Only used for notification
+  static int share_fd;
+  static Scheduler::Queue share_q;
+  static std::mutex share_m;
+  Event events[2];
+ public:
+  ScheduleEventSource(Scheduler *sched);
+
+  void OnEvent(Event *evt) override;
+  bool ReactEvents() override;
+  void SendEvents(Routine *r, bool notify = false);
+ private:
+  static void Initialize();
+  friend void InitThreadPool(int);
+  friend void WaitThreadPool();
+};
+
 void Routine::Run0()
 {
-  sched->BottomHalf(this);
+#if __has_feature(address_sanitizer)
+  if (sched->previous)
+    __sanitizer_finish_switch_fiber(ctx->asan_fake_stack,
+                                    (const void **) sched->previous->ctx->uc_stack.ss_sp,
+                                    &sched->previous->ctx->uc_stack.ss_size);
+#endif
+  sched->mutex.unlock();
+
   Run();
   sched->RunNext(Scheduler::ExitState);
 }
@@ -49,10 +81,10 @@ void Routine::InitFromGarbageContext(ucontext_t *c, void *sp)
 
 static __thread int tls_thread_pool_id = -1;
 static std::vector<Scheduler *> g_schedulers;
-static bool g_thread_pool_should_exit = false;
+static std::atomic_bool g_thread_pool_should_exit(false);
 
 Routine::Routine()
-  : reuse(false), urgent(false), share(false), stack_ver(0)
+    : reuse(false), urgent(false), share(false)
 {
   Reset();
 }
@@ -64,41 +96,7 @@ void Routine::Reset()
   ctx = nullptr;
 }
 
-void Routine::WakeUpOn(int tpid)
-{
-  if (tpid > g_schedulers.size() || tpid < 0) {
-    fprintf(stderr, "Invalid thread id %d, not in the go-routine thread pool\n", tpid);
-    return;
-  }
-
-  if (tpid > 0 && !g_schedulers[tpid]) {
-    fprintf(stderr, "Thread id %d has not initialized\n", tpid);
-    std::abort();
-  }
-
-  if (share && sched && sched->stack_ver != stack_ver) {
-    // always_assert(sched->stack_ver > stack_ver);
-    std::unique_lock<std::mutex> gl(Scheduler::share_m);
-    Detach();
-    Add(&Scheduler::share_q);
-    gl.unlock();
-
-    for (int i = 1; i < g_schedulers.size(); i++) {
-      // fprintf(stderr, "notify share\n");
-      std::lock_guard<std::mutex> _(g_schedulers[i]->mutex);
-      g_schedulers[i]->cond.notify_one();
-    }
-    return;
-  }
-
-  auto target = sched;
-  if (!target) {
-    target = g_schedulers[tpid];
-  }
-  target->WakeUp(this);
-}
-
-void Routine::VoluntarilyPreempt(bool force)
+void Routine::VoluntarilyPreempt(bool urgent)
 {
   if (urgent)
     sched->RunNext(go::Scheduler::NextReadyState);
@@ -106,14 +104,28 @@ void Routine::VoluntarilyPreempt(bool force)
     sched->RunNext(go::Scheduler::ReadyState);
 }
 
-Scheduler::Scheduler()
-  : current(nullptr), delay_garbage_ctx(nullptr), stack_ver(0)
+Scheduler::Scheduler(Routine *r)
+    : waiting(false), current(nullptr), previous(nullptr), delay_garbage_ctx(nullptr)
 {
   ready_q.Init();
+  epoll_fd = epoll_create(1);
+  if (epoll_fd < 0) {
+    perror("epoll_create");
+    std::abort();
+  }
+
+  sources.push_back(new ScheduleEventSource(this));
+  sources.push_back(new NetworkEventSource(this));
+
+  idle = current = r;
+  idle->sched = this;
 }
 
 Scheduler::~Scheduler()
 {
+  for (auto &event_source: sources) {
+    delete event_source;
+  }
   CollectGarbage();
 }
 
@@ -135,35 +147,18 @@ int Scheduler::CurrentThreadPoolId()
   return tls_thread_pool_id;
 }
 
-void Scheduler::RegisterScheduler(int tpid)
-{
-  tls_thread_pool_id = tpid;
-  g_schedulers[tls_thread_pool_id] = new Scheduler();
-}
-
-void Scheduler::UnRegisterScheduler()
-{
-  delete g_schedulers[tls_thread_pool_id];
-  g_schedulers[tls_thread_pool_id] = nullptr;
-}
-
 Scheduler *GetSchedulerFromPool(int thread_id)
 {
   return g_schedulers[thread_id];
 }
 
-void Scheduler::Init(Routine *r)
-{
-  idle = current = r;
-  idle->sched = this;
-}
-
 void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
 {
   // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
-  std::unique_lock<std::mutex> l(mutex);
   bool stack_reuse = false;
   bool should_delete_old = false;
+
+  mutex.lock();
 
   CollectGarbage();
 
@@ -214,35 +209,39 @@ again:
     }
     next->Detach();
   } else {
-    std::unique_lock<std::mutex> gl(share_m);
-    ent = share_q.next;
-    if (ent != &share_q) {
-      next = (Routine *) ent;
-      next->Detach();
-      next->sched = this;
-      goto done;
+    for (auto event_source: sources) {
+      if (event_source->ReactEvents()) goto again;
+    }
+    waiting = true;
+    mutex.unlock();
+    // All effort to react previous handled events failed, we really need to
+    // poll for new events
+    // fprintf(stderr, "epoll_wait()\n");
+    int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, -1);
+    if (rs < 0 && errno != EINTR) {
+      perror("epoll");
+      std::abort();
+    }
+    if (rs < 0 && errno == EINTR) {
+      std::abort();
+    }
+    for (int i = 0; i < rs; i++) {
+      Event *e = (Event *) kernel_events[i].data.ptr;
+      e->mask = kernel_events[i].events;
+      sources[e->event_source_type]->OnEvent(e);
     }
 
-    if (g_thread_pool_should_exit) {
-      next = idle;
-      goto done;
-    }
-
-    gl.unlock();
-    // timeval s; gettimeofday(&s, NULL);
-    cond.wait(l);
-    // timeval e; gettimeofday(&e, NULL);
-    // fprintf(stderr, "%d waited for %lu ms\n", tls_thread_pool_id,
-    // (e.tv_sec - s.tv_sec) * 1000 + (e.tv_usec - s.tv_usec) / 1000);
+    // fprintf(stderr, "epoll_awake\n");
+    mutex.lock();
+    waiting = false;
 
     goto again;
   }
 
-done:
-  void *fake_stack = NULL;
   next_ctx = next->ctx;
+  previous = should_delete_old ? nullptr : current;
   current = next;
-  l.unlock();
+  // l.unlock();
 
   if (stack_reuse) {
     setmcontext_light(&next_ctx->uc_mcontext);
@@ -251,37 +250,29 @@ done:
     //  	    tls_thread_pool_id, this,
     //  	    old, old_ctx, next, next_ctx, old_ctx->uc_stack.ss_sp, next_ctx->uc_stack.ss_sp);
     // always_assert(next->sched == this);
-    swapcontext(old_ctx, next_ctx);
-  } else {
-    // always_assert(old == next);
-  }
-  old->sched->BottomHalf(old);
-}
 
-void Scheduler::BottomHalf(Routine *r)
-{
-  // always_assert(current == r);
-  r->stack_ver = ++stack_ver;
+#if __has_feature(address_sanitizer)
+      __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
+                                     next_ctx->uc_stack.ss_sp,
+                                     next_ctx->uc_stack.ss_size);
+#endif
+    swapcontext(old_ctx, next_ctx);
+
+#if __has_feature(address_sanitizer)
+      void *fake_stack;
+      size_t fake_stack_size;
+      __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
+                                      (const void **) (previous ? &previous->ctx->uc_stack.ss_sp : &fake_stack),
+                                      previous ? &previous->ctx->uc_stack.ss_size : &fake_stack_size);
+#endif
+  }
+  mutex.unlock();
 }
 
 void Scheduler::WakeUp(Routine *r, bool batch)
 {
-  std::lock_guard<std::mutex> _(mutex);
-  r->Detach();
-  if (r->urgent)
-    r->Add(&ready_q);
-  else
-    r->Add(ready_q.prev);
-
-  if (r->sched && r->sched != this) {
-    std::abort();
-    std::lock_guard<std::mutex> _(r->sched->mutex);
-    r->sched->cond.notify_one();
-  }
   r->sched = this;
-  if (!batch) {
-    cond.notify_one();
-  }
+  ((ScheduleEventSource *) sources[ScheduleEventSourceType])->SendEvents(r, !batch);
 }
 
 void Scheduler::CollectGarbage()
@@ -293,22 +284,108 @@ void Scheduler::CollectGarbage()
   }
 }
 
-Scheduler::Queue Scheduler::share_q;
-std::mutex Scheduler::share_m;
+static std::vector<std::thread> g_thread_pool;
 
-void Scheduler::InitShareQueue()
+// Schedule Events
+ScheduleEventSource::ScheduleEventSource(Scheduler *sched)
+    : EventSource(sched), fd(eventfd(0, EFD_NONBLOCK)),
+      events{Event(fd, ScheduleEventSourceType), Event(share_fd, ScheduleEventSourceType)}
 {
-  share_q.Init();
+  struct epoll_event kernel_event = {
+    EPOLLIN, {&events[0]},
+  };
+  struct epoll_event share_kernel_event = {
+    EPOLLIN, {&events[1]},
+  };
+  if (epoll_ctl(sched_epoll(), EPOLL_CTL_ADD, fd, &kernel_event) < 0
+      || epoll_ctl(sched_epoll(), EPOLL_CTL_ADD, share_fd, &share_kernel_event) < 0) {
+    perror("epoll ctr");
+    std::abort();
+  }
 }
 
-static std::vector<std::thread> g_thread_pool;
+void ScheduleEventSource::OnEvent(Event *evt)
+{
+  uint64_t p = 0;
+  while (true) {
+    if (read(evt->fd, &p, sizeof(uint64_t)) < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EWOULDBLOCK || errno == EAGAIN) break;
+    }
+  }
+}
+
+bool ScheduleEventSource::ReactEvents()
+{
+  Routine *r = nullptr;
+  ScheduleEntity *ent;
+
+  std::unique_lock<std::mutex> _(share_m);
+
+  if (g_thread_pool_should_exit.load())
+    goto run_idle;
+
+  ent = share_q.next;
+  if (ent == &share_q)
+    goto run_idle;
+
+  r = (Routine *) ent;
+  r->Detach();
+  r->set_scheduler(sched);
+  r->AddToReadyQueue(sched_ready_queue());
+  return true;
+
+run_idle:
+  if (sched_current() != sched_idle_routine() || g_thread_pool_should_exit.load()) {
+    sched_idle_routine()->AddToReadyQueue(sched_ready_queue());
+    return true;
+  } else {
+    return false;
+  }
+}
+
+void ScheduleEventSource::SendEvents(Routine *r, bool notify)
+{
+  auto old_sched = r->scheduler();
+  LockScheduler(old_sched);
+  r->Detach();
+  r->set_scheduler(sched);
+
+  if (r->is_share()) {
+    std::lock_guard<std::mutex> _(share_m);
+    r->AddToReadyQueue(&share_q);
+
+    if (notify) {
+      uint64_t u = 1;
+      write(share_fd, &u, sizeof(uint64_t));
+    }
+  } else {
+    r->AddToReadyQueue(sched_ready_queue());
+
+    if (notify && sched_is_waiting()) {
+      uint64_t u = 1;
+      write(fd, &u, sizeof(uint64_t));
+    }
+  }
+  UnlockScheduler(old_sched);
+}
+
+int ScheduleEventSource::share_fd;
+Scheduler::Queue ScheduleEventSource::share_q;
+std::mutex ScheduleEventSource::share_m;
+
+void ScheduleEventSource::Initialize()
+{
+  share_q.Init();
+  share_fd = eventfd(0, EFD_NONBLOCK);
+}
 
 // create a "System Idle Process" for scheduler
 
 class IdleRoutine : public Routine {
-public:
+ public:
   IdleRoutine();
-  virtual void Run();
+  void Run() final;
 };
 
 IdleRoutine::IdleRoutine()
@@ -318,7 +395,7 @@ IdleRoutine::IdleRoutine()
 
 void IdleRoutine::Run()
 {
-  while (!g_thread_pool_should_exit) {
+  while (!g_thread_pool_should_exit.load()) {
     Scheduler::Current()->RunNext(Scheduler::SleepState);
   }
   Scheduler::Current()->CollectGarbage();
@@ -326,9 +403,10 @@ void IdleRoutine::Run()
 
 void InitThreadPool(int nr_threads)
 {
+  ScheduleEventSource::Initialize();
+
   std::atomic<int> nr_up(0);
   g_schedulers.resize(nr_threads + 1, nullptr);
-  Scheduler::InitShareQueue();
 
   for (int i = 0; i <= nr_threads; i++) {
     g_thread_pool.emplace_back(std::thread([&nr_up, i, nr_threads] {
@@ -342,66 +420,37 @@ void InitThreadPool(int nr_threads)
 	  }
 	  pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
 
-	  Scheduler::RegisterScheduler(i);
-	  nr_up.fetch_add(1);
-
 	  IdleRoutine idle_routine;
 	  idle_routine.Detach();
-	  Scheduler::Current()->Init(&idle_routine);
+
+          auto sched = new Scheduler(&idle_routine);
+          tls_thread_pool_id = i;
+          g_schedulers[tls_thread_pool_id] = sched;
+
+	  nr_up.fetch_add(1);
+
 	  idle_routine.Run();
+
+          free(idle_routine.ctx);
+          delete g_schedulers[tls_thread_pool_id];
 	}));
   }
   while (nr_up.load() <= nr_threads);
 }
 
-void RunOnMainThread()
-{
-  g_schedulers.push_back(nullptr); // WTF?
-  g_thread_pool_should_exit = true;
-  Scheduler::RegisterScheduler(1);
-  Scheduler::Current()->RunNext(Scheduler::ExitState);
-  Scheduler::Current()->CollectGarbage();
-}
-
 void WaitThreadPool()
 {
-  g_thread_pool_should_exit = true;
+  g_thread_pool_should_exit.store(true);
+  fprintf(stderr, "signal exit\n");
+
   for (auto sched: g_schedulers) {
-    std::lock_guard<std::mutex> _(sched->mutex);
-    sched->cond.notify_one();
+    int fd = ((ScheduleEventSource *) sched->sources[0])->fd;
+    uint64_t u = 1;
+    write(fd, &u, sizeof(uint64_t));
   }
 
   for (auto &t: g_thread_pool) {
     t.join();
-  }
-}
-
-void WaitSlot::WaitForSize(size_t size, std::mutex *lock)
-{
-  auto sched = Scheduler::Current();
-  cap += size;
-  sched->current_routine()->set_wait_for_delta(size);
-  // fprintf(stderr, "%s %p sched %p\n", __FUNCTION__, sched->current_routine(), sched);
-  sched->RunNext(Scheduler::SleepState, &sleep_q, lock);
-  cap -= size;
-  if (lock)
-    lock->lock();
-}
-
-void WaitSlot::Notify(size_t new_cap)
-{
-  auto ent = sleep_q.next;
-  while (ent != &sleep_q) {
-    auto next = ent->next;
-    auto r = (Routine *) ent;
-    auto amt = r->wait_for_delta();
-    // fprintf(stderr, "trying to wake up, amt %lu new_cap %lu\n", amt, new_cap);
-    if (amt > new_cap) return;
-    // fprintf(stderr, "%s %p\n", __FUNCTION__, r);
-    r->WakeUp();
-
-    new_cap -= amt;
-    ent = next;
   }
 }
 
