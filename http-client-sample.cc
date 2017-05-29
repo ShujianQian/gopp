@@ -31,7 +31,7 @@ void HttpClient::Run()
 
   std::stringstream ss;
 
-  ss << "GET /test/8/dolly-net.0.dump HTTP/1.0\r\n\r\n";
+  ss << "GET /test/ HTTP/1.0\r\n\r\n";
 
   output->Write(ss.str().c_str(), ss.str().length());
   output->Flush();

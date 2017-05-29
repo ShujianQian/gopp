@@ -34,8 +34,8 @@ class ScheduleEventSource : public EventSource {
  public:
   ScheduleEventSource(Scheduler *sched);
 
-  void OnEvent(Event *evt) override;
-  bool ReactEvents() override;
+  void OnEvent(Event *evt) final;
+  bool ReactEvents() final;
   void SendEvents(Routine *r, bool notify = false);
  private:
   static void Initialize();
@@ -266,7 +266,7 @@ again:
                                       previous ? &previous->ctx->uc_stack.ss_size : &fake_stack_size);
 #endif
   }
-  mutex.unlock();
+  Scheduler::Current()->mutex.unlock();
 }
 
 void Scheduler::WakeUp(Routine *r, bool batch)

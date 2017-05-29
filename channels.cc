@@ -564,7 +564,7 @@ bool TcpSocket::NotifyAndIO(int qid)
   while (ent != q) {
     auto next = ent->next;
     Routine *r = (Routine *) ent;
-    fprintf(stderr, "wake up %p\n", r);
+    // fprintf(stderr, "wake up %p\n", r);
     r->scheduler()->WakeUp(r);
     ent = next;
   }
@@ -588,7 +588,7 @@ void NetworkEventSource::AddSocket(TcpSocket *sock)
 
 void NetworkEventSource::RemoveSocket(TcpSocket *sock)
 {
-  fprintf(stderr, "remove epoll mod mask %d\n", go::Scheduler::CurrentThreadPoolId());
+  // fprintf(stderr, "remove epoll mod mask %d\n", go::Scheduler::CurrentThreadPoolId());
   struct epoll_event e{0, {sock}};
   if (::epoll_ctl(sched_epoll(), EPOLL_CTL_DEL, sock->fd, &e) < 0) {
     perror("epoll_remove");
@@ -605,7 +605,7 @@ void NetworkEventSource::WatchSocket(go::TcpSocket *sock, uint32_t mask)
   sock->mask |= mask;
   if (oldmask == sock->mask) return;
 
-  fprintf(stderr, "watch epoll mod mask %d on %d\n", sock->mask, go::Scheduler::CurrentThreadPoolId());
+  // fprintf(stderr, "watch epoll mod mask %d on %d\n", sock->mask, go::Scheduler::CurrentThreadPoolId());
   struct epoll_event e{sock->mask, {sock}};
   if (::epoll_ctl(sched_epoll(), EPOLL_CTL_MOD, sock->fd, &e) < 0) {
     perror("epoll_mod");
@@ -622,7 +622,7 @@ void NetworkEventSource::UnWatchSocket(go::TcpSocket *sock, uint32_t mask)
   sock->mask &= ~mask;
   if (oldmask == sock->mask) return;
 
-  fprintf(stderr, "unwatch epoll mod mask %d on %d\n", sock->mask, go::Scheduler::CurrentThreadPoolId());
+  // fprintf(stderr, "unwatch epoll mod mask %d on %d\n", sock->mask, go::Scheduler::CurrentThreadPoolId());
   struct epoll_event e{sock->mask, {sock}};
   if (::epoll_ctl(sched_epoll(), EPOLL_CTL_MOD, sock->fd, &e) < 0) {
     perror("epoll_mod");
