@@ -133,6 +133,7 @@ class Routine : public ScheduleEntity {
  protected:
   ucontext_t *ctx;
   Scheduler *sched;
+  void *user_data;
   bool reuse;
   bool urgent;
   bool share;
@@ -141,7 +142,7 @@ class Routine : public ScheduleEntity {
   friend void InitThreadPool(int);
  public:
 
-  static const size_t kStackSize = (1UL << 20);
+  static const size_t kStackSize = (8UL << 20);
 
   Routine();
   virtual ~Routine() {}
@@ -155,6 +156,8 @@ class Routine : public ScheduleEntity {
   void set_reuse(bool r) { reuse = r; }
   void set_share(bool s) { share = s; }
   bool is_share() const { return share; }
+  void *userdata() const { return user_data; }
+  void set_userdata(void *p) { user_data = p; }
 
   // internal use
   Scheduler *scheduler() const { return sched; }
@@ -171,7 +174,7 @@ class Routine : public ScheduleEntity {
 
  protected:
   void InitStack(ucontext_t *link, size_t stack_size);
-  void InitFromGarbageContext(ucontext_t *ctx, void *sp);
+  void InitFromGarbageContext(ucontext_t *ctx, ucontext_t *link, void *sp);
 };
 
 template <class T>

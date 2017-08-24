@@ -520,8 +520,6 @@ void TcpSocket::Accept()
 
 void TcpSocket::Wait(int qid)
 {
-  // TODO: Add IO pinning support. When IO is pinned to the scheduler, we don't
-  // need to grab any locks
   std::mutex *l = wait_queue_lock(qid);
   if (l) l->lock();
   network_event_source()->WatchSocket(this, qid == ReadQueue ? EPOLLIN : EPOLLOUT);
@@ -533,30 +531,40 @@ bool TcpSocket::NotifyAndIO(int qid)
 {
   auto &wq = wait_queues[qid];
   bool should_unwatch = false;
+  bool done = false;
   std::mutex *l = wait_queue_lock(qid);
   if (l) l->lock();
   if (!ready) {
     if (qid == ReadQueue) {
       // TODO: accept?
     } else if (qid == WriteQueue) {
-   again:
       ready = true;
     }
   } else {
     if (qid == ReadQueue) {
-      if (!wq.buffer->ReadFrom([this](struct iovec *iov, size_t iovcnt) {
-            return ::readv(this->fd, iov, iovcnt);
-          })) {
-        fprintf(stderr, "ReadFrom() return false\n");
-        has_error = true;
-        should_unwatch = true;
+      while (!done && !should_unwatch) {
+        if (!wq.buffer->ReadFrom([this, &done](struct iovec *iov, size_t iovcnt) {
+              auto rs = ::readv(this->fd, iov, iovcnt);
+              if (rs < 0 && errno == EAGAIN)
+                done = true;
+              return rs;
+            })) {
+          fprintf(stderr, "ReadFrom() return false\n");
+          has_error = true;
+          should_unwatch = true;
+        }
+        if (wq.buffer->max_grow_back_space() == 0) should_unwatch = true;
       }
-      if (wq.buffer->max_grow_back_space() == 0) should_unwatch = true;
     } else if (qid == WriteQueue) {
-      wq.buffer->WriteTo([this](struct iovec *iov, size_t iovcnt) {
-          return ::writev(this->fd, iov, iovcnt);
-        });
-      if (wq.buffer->buffer_size() == 0) should_unwatch = true;
+      while (!done && !should_unwatch) {
+        wq.buffer->WriteTo([this, &done](struct iovec *iov, size_t iovcnt) {
+            auto rs = ::writev(this->fd, iov, iovcnt);
+            if (rs < 0 && errno == EAGAIN)
+                done = true;
+            return rs;
+          });
+        if (wq.buffer->buffer_size() == 0) should_unwatch = true;
+      }
     }
   }
   auto q = &wq.q;
@@ -685,10 +693,13 @@ bool TcpInputChannel::Read(void *data, size_t cnt)
   while (q->buffer->buffer_size() < cnt) {
     int fd = sock->fd;
     bool success = !sock->has_error;
-
-    if (success) {
-      success = q->buffer->ReadFrom([fd](struct iovec *iov, size_t iovcnt) {
-          return ::readv(fd, iov, iovcnt);
+    bool done = false;
+    while (success && !done && q->buffer->max_grow_back_space() > 0) {
+      success = q->buffer->ReadFrom([fd, &done](struct iovec *iov, size_t iovcnt) {
+          auto rs = ::readv(fd, iov, iovcnt);
+          if (rs < 0 && errno == EAGAIN)
+            done = true;
+          return rs;
         });
     }
     if (q->buffer->buffer_size() >= cnt) break;
@@ -722,10 +733,15 @@ bool TcpOutputChannel::Write(const void *data, size_t cnt)
     }
 
     int fd = sock->fd;
-
-    q->buffer->WriteTo([fd](struct iovec *iov, size_t iovcnt) {
-        return ::writev(fd, iov, iovcnt);
-      });
+    bool done = false;
+    while (q->buffer->buffer_size() > 0 && !done) {
+      q->buffer->WriteTo([fd, &done](struct iovec *iov, size_t iovcnt) {
+          auto rs = ::writev(fd, iov, iovcnt);
+          if (rs < 0 && errno == EAGAIN)
+            done = true;
+          return rs;
+        });
+    }
 
     if (q->buffer->max_grow_back_space() >= cnt) break;
 

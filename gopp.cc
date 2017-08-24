@@ -73,9 +73,10 @@ void Routine::InitStack(ucontext_t *link, size_t stack_size)
   makecontext(ctx, routine_func, this);
 }
 
-void Routine::InitFromGarbageContext(ucontext_t *c, void *sp)
+void Routine::InitFromGarbageContext(ucontext_t *c, ucontext_t *link, void *sp)
 {
   ctx = c;
+  ctx->uc_link = link;
   makecontext(ctx, routine_func, this);
 }
 
@@ -84,7 +85,7 @@ static std::vector<Scheduler *> g_schedulers;
 static std::atomic_bool g_thread_pool_should_exit(false);
 
 Routine::Routine()
-    : reuse(false), urgent(false), share(false)
+    : user_data(nullptr), reuse(false), urgent(false), share(false)
 {
   Reset();
 }
@@ -119,6 +120,8 @@ Scheduler::Scheduler(Routine *r)
 
   idle = current = r;
   idle->sched = this;
+
+  getmcontext(&idle->ctx->uc_mcontext);
 }
 
 Scheduler::~Scheduler()
@@ -200,7 +203,7 @@ again:
       if (delay_garbage_ctx) {
 	// reuse the stack and context memory
 	// fprintf(stderr, "reuse ctx %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
-	next->InitFromGarbageContext(delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
+	next->InitFromGarbageContext(delay_garbage_ctx, idle->ctx, delay_garbage_ctx->uc_stack.ss_sp);
 	delay_garbage_ctx = nullptr;
 	stack_reuse = true;
       } else {
@@ -217,13 +220,14 @@ again:
     // All effort to react previous handled events failed, we really need to
     // poll for new events
     // fprintf(stderr, "epoll_wait()\n");
+ epoll_again:
     int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, -1);
     if (rs < 0 && errno != EINTR) {
       perror("epoll");
       std::abort();
     }
     if (rs < 0 && errno == EINTR) {
-      std::abort();
+      goto epoll_again;
     }
     for (int i = 0; i < rs; i++) {
       Event *e = (Event *) kernel_events[i].data.ptr;

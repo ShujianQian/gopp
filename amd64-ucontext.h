@@ -152,15 +152,17 @@ static inline void makecontext(ucontext_t *ucp, void (*func)(void *), void *ptr)
 {
   long *sp;
 
-  asm volatile("fnstenv %0" : "=m" (ucp->uc_mcontext.mc_fpstate[0]));
-  asm volatile("stmxcsr %0" : "=m" (ucp->uc_mcontext.mc_fpstate[3]));
+  // asm volatile("fnstenv %0" : "=m" (ucp->uc_mcontext.mc_fpstate[0]));
+  // asm volatile("stmxcsr %0" : "=m" (ucp->uc_mcontext.mc_fpstate[3]));
 
   ucp->uc_mcontext.mc_rdi = (long) ptr;
 
   sp = (long *) ucp->uc_stack.ss_sp+ucp->uc_stack.ss_size / sizeof(long);
   sp -= 1;
+  *sp = ucp->uc_link->uc_mcontext.mc_rip;
   // sp = (void *)((uintptr_t) sp - (uintptr_t) sp % 16);	/* 16-align for OS X */
   // *--sp = 0;	/* return address */
+  ucp->uc_mcontext.mc_rbp = (long) ucp->uc_link->uc_mcontext.mc_rbp;
   ucp->uc_mcontext.mc_rip = (long) func;
   ucp->uc_mcontext.mc_rsp = (long) sp;
 }

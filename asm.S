@@ -2,6 +2,7 @@
 
 .globl setmcontext_light
 setmcontext_light:
+	movq	72(%rdi), %rbp
         movq	184(%rdi), %rsp
         pushq   160(%rdi)
         movq    8(%rdi), %rdi
@@ -25,8 +26,8 @@ setmcontext:
 	movq	120(%rdi), %r15
 	movq	184(%rdi), %rsp
 
-        fldenv 224(%rdi)
-        ldmxcsr 248(%rdi)
+        /* fldenv 224(%rdi) */
+        /* ldmxcsr 248(%rdi) */
 
 	pushq	160(%rdi)	/* new %eip */
 	movq	8(%rdi), %rdi
@@ -55,8 +56,8 @@ getmcontext:
 	leaq	8(%rsp), %rcx	/* %rsp */
 	movq	%rcx, 184(%rdi)
 
-        fnstenv 224(%rdi)
-        stmxcsr 248(%rdi)
+        /* fnstenv 224(%rdi) */
+        /* stmxcsr 248(%rdi) */
 
 	movq	32(%rdi), %rcx	/* restore %rcx */
 	movq	$0, %rax
