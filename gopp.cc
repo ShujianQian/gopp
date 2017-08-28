@@ -62,21 +62,23 @@ static void routine_func(void *r)
   ((Routine *) r)->Run0();
 }
 
-void Routine::InitStack(ucontext_t *link, size_t stack_size)
+void Routine::InitStack(Scheduler *sched, size_t stack_size)
 {
   ctx = (ucontext_t *) calloc(1, sizeof(ucontext_t));
   ctx->uc_stack.ss_sp = malloc(stack_size);
   ctx->uc_stack.ss_size = stack_size;
   ctx->uc_stack.ss_flags = 0;
-  ctx->uc_link = link;
+  ctx->uc_mcontext.mc_rip = sched->link_rip;
+  ctx->uc_mcontext.mc_rbp = sched->link_rbp;
 
   makecontext(ctx, routine_func, this);
 }
 
-void Routine::InitFromGarbageContext(ucontext_t *c, ucontext_t *link, void *sp)
+void Routine::InitFromGarbageContext(ucontext_t *c, Scheduler *sched, void *sp)
 {
   ctx = c;
-  ctx->uc_link = link;
+  ctx->uc_mcontext.mc_rip = sched->link_rip;
+  ctx->uc_mcontext.mc_rbp = sched->link_rbp;
   makecontext(ctx, routine_func, this);
 }
 
@@ -120,8 +122,6 @@ Scheduler::Scheduler(Routine *r)
 
   idle = current = r;
   idle->sched = this;
-
-  getmcontext(&idle->ctx->uc_mcontext);
 }
 
 Scheduler::~Scheduler()
@@ -130,6 +130,14 @@ Scheduler::~Scheduler()
     delete event_source;
   }
   CollectGarbage();
+}
+
+// This is merely a stub on the call stack. Can only be invoked by the idle routine
+void Scheduler::StartRoutineStub()
+{
+  getmcontext(&idle->ctx->uc_mcontext);
+  link_rip = idle->ctx->uc_mcontext.mc_rip;
+  link_rbp = idle->ctx->uc_mcontext.mc_rbp;
 }
 
 Scheduler *Scheduler::Current()
@@ -203,11 +211,11 @@ again:
       if (delay_garbage_ctx) {
 	// reuse the stack and context memory
 	// fprintf(stderr, "reuse ctx %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
-	next->InitFromGarbageContext(delay_garbage_ctx, idle->ctx, delay_garbage_ctx->uc_stack.ss_sp);
+	next->InitFromGarbageContext(delay_garbage_ctx, this, delay_garbage_ctx->uc_stack.ss_sp);
 	delay_garbage_ctx = nullptr;
 	stack_reuse = true;
       } else {
-	next->InitStack(idle->ctx, Routine::kStackSize);
+	next->InitStack(this, Routine::kStackSize);
       }
     }
     next->Detach();
@@ -433,6 +441,7 @@ void InitThreadPool(int nr_threads)
 
 	  nr_up.fetch_add(1);
 
+          sched->StartRoutineStub();
 	  idle_routine.Run();
 
           free(idle_routine.ctx);

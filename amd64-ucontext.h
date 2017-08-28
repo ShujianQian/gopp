@@ -142,7 +142,7 @@ struct ucontext {
   // sigset_t	uc_sigmask;
   mcontext_t	uc_mcontext;
 
-  struct ucontext *uc_link;
+  // struct ucontext *uc_link;
   stack_t	uc_stack;
   void         *asan_fake_stack;
   int		__spare__[8];
@@ -159,10 +159,9 @@ static inline void makecontext(ucontext_t *ucp, void (*func)(void *), void *ptr)
 
   sp = (long *) ucp->uc_stack.ss_sp+ucp->uc_stack.ss_size / sizeof(long);
   sp -= 1;
-  *sp = ucp->uc_link->uc_mcontext.mc_rip;
+  *sp = ucp->uc_mcontext.mc_rip;
   // sp = (void *)((uintptr_t) sp - (uintptr_t) sp % 16);	/* 16-align for OS X */
   // *--sp = 0;	/* return address */
-  ucp->uc_mcontext.mc_rbp = (long) ucp->uc_link->uc_mcontext.mc_rbp;
   ucp->uc_mcontext.mc_rip = (long) func;
   ucp->uc_mcontext.mc_rsp = (long) sp;
 }

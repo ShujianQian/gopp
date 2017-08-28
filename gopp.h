@@ -77,6 +77,8 @@ class Scheduler {
   ucontext_t *delay_garbage_ctx;
   Routine *idle;
 
+  long link_rip, link_rbp;
+
   static const int kNrEpollKernelEvents = 32;
   int epoll_fd;
   struct epoll_event kernel_events[kNrEpollKernelEvents];
@@ -93,6 +95,8 @@ class Scheduler {
   void RunNext(State state, Queue *q = nullptr, std::mutex *sleep_lock = nullptr);
   void CollectGarbage();
   void WakeUp(Routine *r, bool batch = false);
+
+  void StartRoutineStub();
 
   Routine *current_routine() const { return current; }
 
@@ -173,8 +177,8 @@ class Routine : public ScheduleEntity {
   void Run0();
 
  protected:
-  void InitStack(ucontext_t *link, size_t stack_size);
-  void InitFromGarbageContext(ucontext_t *ctx, ucontext_t *link, void *sp);
+  void InitStack(Scheduler *sched, size_t stack_size);
+  void InitFromGarbageContext(ucontext_t *c, Scheduler *sched, void *sp);
 };
 
 template <class T>
