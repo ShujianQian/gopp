@@ -46,10 +46,11 @@ class ScheduleEventSource : public EventSource {
 void Routine::Run0()
 {
 #if __has_feature(address_sanitizer)
-  if (sched->previous)
+  if (sched->prev_ctx) {
     __sanitizer_finish_switch_fiber(ctx->asan_fake_stack,
-                                    (const void **) sched->previous->ctx->uc_stack.ss_sp,
-                                    &sched->previous->ctx->uc_stack.ss_size);
+                                    (const void **) &sched->prev_ctx->uc_stack.ss_sp,
+                                    &sched->prev_ctx->uc_stack.ss_size);
+  }
 #endif
   sched->mutex.unlock();
 
@@ -108,7 +109,7 @@ void Routine::VoluntarilyPreempt(bool urgent)
 }
 
 Scheduler::Scheduler(Routine *r)
-    : waiting(false), current(nullptr), previous(nullptr), delay_garbage_ctx(nullptr)
+    : waiting(false), current(nullptr), prev_ctx(nullptr), delay_garbage_ctx(nullptr)
 {
   ready_q.Init();
   epoll_fd = epoll_create(1);
@@ -196,10 +197,11 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
       should_delete_old = true;
     }
     delay_garbage_ctx = old->ctx;
-    // fprintf(stderr, "routine %p (ctx %p) is garbage now\n", delay_garbage, delay_garbage_ctx);
+    // fprintf(stderr, "ctx %p is garbage now, ss_sp %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
   }
   old_ctx = old->ctx;
 
+  // if (state == ExitState) old->ctx = nullptr;
   if (should_delete_old) delete old;
 
 again:
@@ -251,7 +253,7 @@ again:
   }
 
   next_ctx = next->ctx;
-  previous = should_delete_old ? nullptr : current;
+  prev_ctx = stack_reuse ? nullptr : old_ctx;
   current = next;
   // l.unlock();
 
@@ -264,18 +266,23 @@ again:
     // always_assert(next->sched == this);
 
 #if __has_feature(address_sanitizer)
-      __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
-                                     next_ctx->uc_stack.ss_sp,
-                                     next_ctx->uc_stack.ss_size);
+    __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
+                                   next_ctx->uc_stack.ss_sp,
+                                   next_ctx->uc_stack.ss_size);
 #endif
     swapcontext(old_ctx, next_ctx);
-
 #if __has_feature(address_sanitizer)
+    if (prev_ctx) {
+      __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
+                                      (const void **) &prev_ctx->uc_stack.ss_sp,
+                                      &prev_ctx->uc_stack.ss_size);
+    } else {
       void *fake_stack;
       size_t fake_stack_size;
+
       __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
-                                      (const void **) (previous ? &previous->ctx->uc_stack.ss_sp : &fake_stack),
-                                      previous ? &previous->ctx->uc_stack.ss_size : &fake_stack_size);
+                                      (const void **) &fake_stack, &fake_stack_size);
+    }
 #endif
   }
   Scheduler::Current()->mutex.unlock();
@@ -290,6 +297,7 @@ void Scheduler::WakeUp(Routine *r, bool batch)
 void Scheduler::CollectGarbage()
 {
   if (delay_garbage_ctx) {
+    // fprintf(stderr, "Collecting %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
     free(delay_garbage_ctx->uc_stack.ss_sp);
     free(delay_garbage_ctx);
     delay_garbage_ctx = nullptr;
@@ -410,13 +418,11 @@ void IdleRoutine::Run()
   while (!g_thread_pool_should_exit.load()) {
     Scheduler::Current()->RunNext(Scheduler::SleepState);
   }
-  Scheduler::Current()->CollectGarbage();
 }
 
 void InitThreadPool(int nr_threads)
 {
   ScheduleEventSource::Initialize();
-
   std::atomic<int> nr_up(0);
   g_schedulers.resize(nr_threads + 1, nullptr);
 
@@ -444,8 +450,8 @@ void InitThreadPool(int nr_threads)
           sched->StartRoutineStub();
 	  idle_routine.Run();
 
-          free(idle_routine.ctx);
-          delete g_schedulers[tls_thread_pool_id];
+          // free(idle_routine.ctx);
+          // delete g_schedulers[tls_thread_pool_id];
 	}));
   }
   while (nr_up.load() <= nr_threads);

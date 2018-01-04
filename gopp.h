@@ -73,7 +73,7 @@ class Scheduler {
   Queue ready_q;
 
   Routine *current;
-  Routine *previous;
+  ucontext_t *prev_ctx;
   ucontext_t *delay_garbage_ctx;
   Routine *idle;
 
