@@ -47,6 +47,7 @@ void Routine::Run0()
 {
 #if __has_feature(address_sanitizer)
   if (sched->prev_ctx) {
+    puts("finishing switch fiber");
     __sanitizer_finish_switch_fiber(ctx->asan_fake_stack,
                                     (const void **) &sched->prev_ctx->uc_stack.ss_sp,
                                     &sched->prev_ctx->uc_stack.ss_size);
@@ -210,6 +211,9 @@ again:
   if (ent != &ready_q) {
     next = (Routine *) ent;
     if (!next->ctx) {
+#if __has_feature(address_sanitizer)
+      next->InitStack(this, Routine::kStackSize);
+#else
       if (delay_garbage_ctx) {
 	// reuse the stack and context memory
 	// fprintf(stderr, "reuse ctx %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
@@ -219,6 +223,7 @@ again:
       } else {
 	next->InitStack(this, Routine::kStackSize);
       }
+#endif
     }
     next->Detach();
   } else {
@@ -258,6 +263,7 @@ again:
   // l.unlock();
 
   if (stack_reuse) {
+    puts("Fast switch");
     setmcontext_light(&next_ctx->uc_mcontext);
   } else if (old_ctx != next_ctx) {
     // fprintf(stderr, "%d (%p) context switch (%p)%p=>(%p)%p, old stack %p new stack %p\n",
@@ -266,6 +272,7 @@ again:
     // always_assert(next->sched == this);
 
 #if __has_feature(address_sanitizer)
+    puts("start fiber switch");
     __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
                                    next_ctx->uc_stack.ss_sp,
                                    next_ctx->uc_stack.ss_size);
@@ -279,7 +286,7 @@ again:
     } else {
       void *fake_stack;
       size_t fake_stack_size;
-
+      puts("finishing fiber switch");
       __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
                                       (const void **) &fake_stack, &fake_stack_size);
     }
@@ -377,14 +384,20 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
 
     if (notify) {
       uint64_t u = 1;
-      write(share_fd, &u, sizeof(uint64_t));
+      if (write(share_fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
+        perror("write to share event fd");
+        std::abort();
+      }
     }
   } else {
     r->AddToReadyQueue(sched_ready_queue());
 
     if (notify && sched_is_waiting()) {
       uint64_t u = 1;
-      write(fd, &u, sizeof(uint64_t));
+      if (write(fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
+        perror("write to event fd");
+        std::abort();
+      }
     }
   }
   UnlockScheduler(old_sched);
@@ -438,20 +451,17 @@ void InitThreadPool(int nr_threads)
 	  }
 	  pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
 
-	  IdleRoutine idle_routine;
-	  idle_routine.Detach();
+	  auto idle_routine = new IdleRoutine;
+	  idle_routine->Detach();
 
-          auto sched = new Scheduler(&idle_routine);
+          auto sched = new Scheduler(idle_routine);
           tls_thread_pool_id = i;
           g_schedulers[tls_thread_pool_id] = sched;
 
 	  nr_up.fetch_add(1);
 
           sched->StartRoutineStub();
-	  idle_routine.Run();
-
-          // free(idle_routine.ctx);
-          // delete g_schedulers[tls_thread_pool_id];
+	  idle_routine->Run();
 	}));
   }
   while (nr_up.load() <= nr_threads);
@@ -460,16 +470,23 @@ void InitThreadPool(int nr_threads)
 void WaitThreadPool()
 {
   g_thread_pool_should_exit.store(true);
-  fprintf(stderr, "signal exit\n");
 
   for (auto sched: g_schedulers) {
     int fd = ((ScheduleEventSource *) sched->sources[0])->fd;
     uint64_t u = 1;
-    write(fd, &u, sizeof(uint64_t));
+    if (write(fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
+      fputs("warning: cannot signal the thread via event fd\n", stderr);
+    }
   }
 
   for (auto &t: g_thread_pool) {
     t.join();
+  }
+
+  for (auto sched: g_schedulers) {
+    free(sched->idle->ctx);
+    delete sched->idle;
+    delete sched;
   }
 }
 

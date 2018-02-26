@@ -74,7 +74,11 @@ class TcpSocket : public Event {
 
   TcpInputChannel *in_chan;
   TcpOutputChannel *out_chan;
-
+ private:
+  void InitTcpSocket(size_t in_buffer_size, size_t out_buffer_size,
+                     int fd, Scheduler *sched);
+  void FillSockAddr(std::string address, int port);
+  TcpSocket();
  public:
   TcpSocket(size_t in_buffer_size, size_t out_buffer_size,
             int domain = AF_INET, Scheduler *sched = nullptr);
@@ -82,7 +86,9 @@ class TcpSocket : public Event {
 
   bool Pin();
   bool Connect(std::string address, int port);
-  void Accept(); // TODO:
+  bool Bind(std::string address, int port);
+  bool Listen(int backlog = 128);
+  TcpSocket *Accept();
   void Close();
 
   TcpInputChannel *input_channel() { return in_chan; }

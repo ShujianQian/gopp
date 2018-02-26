@@ -1,6 +1,6 @@
 project(goplusplus C CXX ASM)
 
-add_definitions(-std=c++11 -fno-omit-frame-pointer)
+add_definitions(-std=c++17 -fno-omit-frame-pointer)
 
 set(CMAKE_C_FLAGS_DEBUG "-g -fsanitize=address")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -fsanitize=address")

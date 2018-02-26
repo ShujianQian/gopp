@@ -144,6 +144,7 @@ class Routine : public ScheduleEntity {
 
   friend class Scheduler;
   friend void InitThreadPool(int);
+  friend void WaitThreadPool();
  public:
 
   static const size_t kStackSize = (8UL << 20);

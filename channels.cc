@@ -294,8 +294,8 @@ void IOBuffer::Push(const void *data, size_t cnt)
 }
 
 BufferChannel::BufferChannel(size_t buffer_size)
-    : bufsz(0), small_buffer(nullptr), large_buffer(nullptr),
-      capacity(buffer_size), eof(false)
+    : capacity(buffer_size), bufsz(0), small_buffer(nullptr),
+      large_buffer(nullptr), eof(false)
 {
   if (capacity <= 1024)
     small_buffer = new uint8_t[capacity];
@@ -414,16 +414,20 @@ void BufferChannel::Close()
   eof = true;
 }
 
-TcpSocket::TcpSocket(size_t in_buffer_size, size_t out_buffer_size, int domain,
-                     Scheduler *scheduler)
-    : Event(0, NetworkEventSourceType), mask(0), sched(scheduler), pinned(false), ready(false),
-      has_error(false), domain(domain)
+void TcpSocket::InitTcpSocket(size_t in_buffer_size, size_t out_buffer_size, int fd,
+                              Scheduler *scheduler)
 {
+  mask = 0;
+  sched = scheduler;
+  pinned = false;
+  ready = false;
+  has_error = false;
+
   for (int i = 0; i < kNrQueues; i++) {
     wait_queues[i].ready = false;
     wait_queues[i].q.Init();
   }
-  fd = ::socket(domain, SOCK_STREAM, 0);
+  this->fd = fd;
 
   // Setting the socket to nonblock mode
   if (::fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
@@ -438,6 +442,20 @@ TcpSocket::TcpSocket(size_t in_buffer_size, size_t out_buffer_size, int domain,
 
   in_chan = new TcpInputChannel(in_buffer_size, this);
   out_chan = new TcpOutputChannel(out_buffer_size, this);
+}
+
+TcpSocket::TcpSocket(size_t in_buffer_size, size_t out_buffer_size,
+                     int domain, Scheduler *sched)
+    : Event(0, NetworkEventSourceType)
+{
+  InitTcpSocket(in_buffer_size, out_buffer_size, ::socket(domain, SOCK_STREAM, 0), sched);
+  this->domain = domain;
+}
+
+TcpSocket::TcpSocket()
+    : Event(0, NetworkEventSourceType)
+{
+  in_chan = nullptr; out_chan = nullptr;
 }
 
 TcpSocket::~TcpSocket()
@@ -461,7 +479,12 @@ bool TcpSocket::Pin()
   return false;
 }
 
-bool TcpSocket::Connect(std::string address, int port)
+union CommonInetAddr {
+  struct in_addr addr4;
+  struct in6_addr addr6;
+};
+
+void TcpSocket::FillSockAddr(std::string address, int port)
 {
   // TODO: Should use getaddrinfo() to query the DNS.
   union {
@@ -485,6 +508,11 @@ bool TcpSocket::Connect(std::string address, int port)
     sockaddr.sockaddr6.sin6_port = htons(port);
     sockaddrlen = sizeof(struct sockaddr_in6);
   }
+}
+
+bool TcpSocket::Connect(std::string address, int port)
+{
+  FillSockAddr(address, port);
 
 again:
   if (::connect(fd, (struct sockaddr *) &sockaddr, sockaddrlen) < 0) {
@@ -501,6 +529,27 @@ again:
   return true;
 }
 
+bool TcpSocket::Bind(std::string address, int port)
+{
+  FillSockAddr(address, port);
+
+again:
+  if (::bind(fd, (struct sockaddr *) &sockaddr, sockaddrlen) < 0) {
+    perror("bind");
+    return false;
+  }
+  return true;
+}
+
+bool TcpSocket::Listen(int backlog)
+{
+  if (::listen(fd, backlog) < 0) {
+    perror("listen");
+    return false;
+  }
+  return true;
+}
+
 void TcpSocket::Close()
 {
 again:
@@ -513,9 +562,27 @@ again:
   }
 }
 
-void TcpSocket::Accept()
+TcpSocket *TcpSocket::Accept()
 {
-  // TODO:
+  TcpSocket *result = new TcpSocket();
+  int client_fd = 0;
+again:
+  client_fd = ::accept(fd, (struct sockaddr *) &result->sockaddr, &result->sockaddrlen);
+  if (client_fd < 0) {
+    if (errno == EINTR) {
+      goto again;
+    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      Wait(QueueEnum::ReadQueue);
+      goto again;
+    } else {
+      perror("accept");
+      delete result;
+      return nullptr;
+    }
+  }
+  result->InitTcpSocket(in_chan->q->buffer->capacity(), out_chan->q->buffer->capacity(),
+                        client_fd, sched);
+  return result;
 }
 
 void TcpSocket::Wait(int qid)
