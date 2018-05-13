@@ -647,6 +647,19 @@ bool TcpSocket::NotifyAndIO(int qid)
   return should_unwatch;
 }
 
+std::string TcpSocket::host() const
+{
+  if (sockaddrlen == sizeof(struct sockaddr_in)) {
+    return std::string(inet_ntoa(sockaddr.sockaddr4.sin_addr));
+  } else if (sockaddrlen == sizeof(struct sockaddr_in6)) {
+    // TODO:
+    return std::string("IPv6 addr not implemented");
+  } else {
+    fputs("Cannot recognize the addrlen\n", stderr);
+    std::abort();
+  }
+}
+
 NetworkEventSource::NetworkEventSource(Scheduler *sched)
     : EventSource(sched)
 {

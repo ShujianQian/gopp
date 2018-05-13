@@ -91,6 +91,8 @@ class TcpSocket : public Event {
   TcpSocket *Accept();
   void Close();
 
+  std::string host() const;
+
   TcpInputChannel *input_channel() { return in_chan; }
   TcpOutputChannel *output_channel() { return out_chan; }
 

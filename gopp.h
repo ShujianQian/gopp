@@ -3,11 +3,7 @@
 #ifndef GOPP_H
 #define GOPP_H
 
-#include <cstddef>
-#include <cstdlib>
 #include <cassert>
-#include <climits>
-#include <functional>
 #include <mutex>
 #include <vector>
 
