@@ -263,7 +263,7 @@ again:
   // l.unlock();
 
   if (stack_reuse) {
-    puts("Fast switch");
+    // puts("Fast switch");
     setmcontext_light(&next_ctx->uc_mcontext);
   } else if (old_ctx != next_ctx) {
     // fprintf(stderr, "%d (%p) context switch (%p)%p=>(%p)%p, old stack %p new stack %p\n",
