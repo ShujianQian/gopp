@@ -8,10 +8,9 @@
 #include <vector>
 
 #include <sys/epoll.h>
-
 #include <x86intrin.h>
 
-#include "amd64-ucontext.h"
+struct ucontext;
 
 namespace go {
 
@@ -69,8 +68,8 @@ class Scheduler {
   Queue ready_q;
 
   Routine *current;
-  ucontext_t *prev_ctx;
-  ucontext_t *delay_garbage_ctx;
+  ucontext *prev_ctx;
+  ucontext *delay_garbage_ctx;
   Routine *idle;
 
   long link_rip, link_rbp;
@@ -131,7 +130,7 @@ class EventSource {
 
 class Routine : public ScheduleEntity {
  protected:
-  ucontext_t *ctx;
+  ucontext *ctx;
   Scheduler *sched;
   void *user_data;
   bool reuse;
@@ -175,7 +174,7 @@ class Routine : public ScheduleEntity {
 
  protected:
   void InitStack(Scheduler *sched, size_t stack_size);
-  void InitFromGarbageContext(ucontext_t *c, Scheduler *sched, void *sp);
+  void InitFromGarbageContext(ucontext *c, Scheduler *sched, void *sp);
 };
 
 template <class T>
