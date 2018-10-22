@@ -13,6 +13,7 @@
 #include <sys/time.h>
 
 #include "channels.h"
+#include "amd64-ucontext.h"
 
 #if __has_feature(address_sanitizer)
 
@@ -66,7 +67,7 @@ static void routine_func(void *r)
 
 void Routine::InitStack(Scheduler *sched, size_t stack_size)
 {
-  ctx = (ucontext_t *) calloc(1, sizeof(ucontext_t));
+  ctx = (ucontext *) calloc(1, sizeof(ucontext_t));
   ctx->uc_stack.ss_sp = malloc(stack_size);
   ctx->uc_stack.ss_size = stack_size;
   ctx->uc_stack.ss_flags = 0;
