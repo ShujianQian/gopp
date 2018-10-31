@@ -208,6 +208,20 @@ class OutputChannel {
   virtual void Close() = 0;
 };
 
+
+class RoutineScopedData {
+  void *olddata;
+ public:
+  RoutineScopedData(void *data) {
+    auto r = go::Scheduler::Current()->current_routine();
+    olddata = r->userdata();
+    r->set_userdata(data);
+  }
+  ~RoutineScopedData() {
+    go::Scheduler::Current()->current_routine()->set_userdata(olddata);
+  }
+};
+
 }
 
 #endif /* GOPP_H */
