@@ -65,11 +65,17 @@ class TcpSocket : public Event {
   bool ready;
   bool has_error;
   int domain;
+ public:
 
-  union {
+  union CommonInetAddr {
     struct sockaddr_in sockaddr4;
     struct sockaddr_in6 sockaddr6;
-  } sockaddr;
+
+    struct sockaddr *sockaddr() { return (struct sockaddr *) this; }
+  };
+
+ private:
+  CommonInetAddr sockaddr;
   socklen_t sockaddrlen;
 
   TcpInputChannel *in_chan;
@@ -77,9 +83,12 @@ class TcpSocket : public Event {
  private:
   void InitTcpSocket(size_t in_buffer_size, size_t out_buffer_size,
                      int fd, Scheduler *sched);
-  void FillSockAddr(std::string address, int port);
   TcpSocket();
  public:
+
+  // Helper function
+  static bool FillSockAddr(CommonInetAddr &sockaddr, socklen_t &socklen, int domain, std::string address, int port);
+
   TcpSocket(size_t in_buffer_size, size_t out_buffer_size,
             int domain = AF_INET, Scheduler *sched = nullptr);
   virtual ~TcpSocket();

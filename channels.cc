@@ -479,12 +479,7 @@ bool TcpSocket::Pin()
   return false;
 }
 
-union CommonInetAddr {
-  struct in_addr addr4;
-  struct in6_addr addr6;
-};
-
-void TcpSocket::FillSockAddr(std::string address, int port)
+bool TcpSocket::FillSockAddr(CommonInetAddr &sockaddr, socklen_t &sockaddrlen, int domain, std::string address, int port)
 {
   // TODO: Should use getaddrinfo() to query the DNS.
   union {
@@ -493,8 +488,7 @@ void TcpSocket::FillSockAddr(std::string address, int port)
   } addr;
 
   if (inet_pton(domain, address.c_str(), &addr) < 0) {
-    perror("inet_pton");
-    std::abort();
+    return false;
   }
 
   if (domain == AF_INET) {
@@ -508,11 +502,12 @@ void TcpSocket::FillSockAddr(std::string address, int port)
     sockaddr.sockaddr6.sin6_port = htons(port);
     sockaddrlen = sizeof(struct sockaddr_in6);
   }
+  return true;
 }
 
 bool TcpSocket::Connect(std::string address, int port)
 {
-  FillSockAddr(address, port);
+  FillSockAddr(sockaddr, sockaddrlen, domain, address, port);
 
 again:
   if (::connect(fd, (struct sockaddr *) &sockaddr, sockaddrlen) < 0) {
@@ -531,7 +526,7 @@ again:
 
 bool TcpSocket::Bind(std::string address, int port)
 {
-  FillSockAddr(address, port);
+  FillSockAddr(sockaddr, sockaddrlen, domain, address, port);
 
 again:
   if (::bind(fd, (struct sockaddr *) &sockaddr, sockaddrlen) < 0) {
