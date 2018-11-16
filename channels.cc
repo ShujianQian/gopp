@@ -177,7 +177,7 @@ bool IOBuffer::ReadFrom(std::function<int (struct iovec *, int)> callback)
   if ((offset + size) % kPageSize != 0) {
     size_t last_page_len = (offset + size) % kPageSize;
     iov[0].iov_base = head.prev->data + last_page_len;
-    acc_iosize = iov[0].iov_len = kPageSize - last_page_len;
+    acc_iosize = iov[0].iov_len = std::min(kPageSize - last_page_len, iosize);
     iovcnt = 1;
   }
 
@@ -226,7 +226,7 @@ void IOBuffer::WriteTo(std::function<int (struct iovec *, int)> callback)
   if (offset != 0) {
     size_t first_page_len = offset;
     iov[0].iov_base = head.next->data + first_page_len;
-    acc_iosize = iov[0].iov_len = kPageSize - first_page_len;
+    acc_iosize = iov[0].iov_len = std::min(kPageSize - first_page_len, iosize);
     iovcnt = 1;
     last_page = head.next;
   }
