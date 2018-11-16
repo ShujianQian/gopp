@@ -444,11 +444,12 @@ void InitThreadPool(int nr_threads)
     g_thread_pool.emplace_back(std::thread([&nr_up, i, nr_threads] {
 	  // linux only
 	  cpu_set_t set;
+          int nr_processors = sysconf(_SC_NPROCESSORS_CONF);
 	  CPU_ZERO(&set);
-	  if (i > 0) {
-	    CPU_SET((i - 1) % sysconf(_SC_NPROCESSORS_CONF), &set);
+	  if (nr_processors >= i && i > 0) {
+	    CPU_SET(i - 1 , &set);
 	  } else {
-	    for (int j = 0; j < nr_threads; j++) CPU_SET(j % sysconf(_SC_NPROCESSORS_CONF), &set);
+	    for (int j = 0; j < nr_threads; j++) CPU_SET(j % nr_processors, &set);
 	  }
 	  pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
 
