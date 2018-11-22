@@ -100,6 +100,8 @@ class TcpSocket : public Event {
   TcpSocket *Accept();
   void Close();
 
+  void EnableReuse();
+
   std::string host() const;
 
   TcpInputChannel *input_channel() { return in_chan; }

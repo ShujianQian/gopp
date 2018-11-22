@@ -453,10 +453,8 @@ TcpSocket::TcpSocket(size_t in_buffer_size, size_t out_buffer_size,
 }
 
 TcpSocket::TcpSocket()
-    : Event(0, NetworkEventSourceType)
-{
-  in_chan = nullptr; out_chan = nullptr;
-}
+    : Event(0, NetworkEventSourceType), sockaddrlen(0), in_chan(nullptr), out_chan(nullptr)
+{}
 
 TcpSocket::~TcpSocket()
 {
@@ -554,6 +552,17 @@ again:
     } else {
       perror("close");
     }
+  }
+}
+
+void TcpSocket::EnableReuse()
+{
+  int enable = 1;
+  if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, 4) < 0) {
+    perror("setsockopt SO_REUSEADDR");
+  }
+  if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enable, 4) < 0) {
+    perror("setsockopt SO_REUSEPORT");
   }
 }
 

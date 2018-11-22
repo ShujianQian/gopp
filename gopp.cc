@@ -48,7 +48,7 @@ void Routine::Run0()
 {
 #if __has_feature(address_sanitizer)
   if (sched->prev_ctx) {
-    puts("finishing switch fiber");
+    // puts("finishing switch fiber");
     __sanitizer_finish_switch_fiber(ctx->asan_fake_stack,
                                     (const void **) &sched->prev_ctx->uc_stack.ss_sp,
                                     &sched->prev_ctx->uc_stack.ss_size);
@@ -273,7 +273,7 @@ again:
     // always_assert(next->sched == this);
 
 #if __has_feature(address_sanitizer)
-    puts("start fiber switch");
+    // puts("start fiber switch");
     __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
                                    next_ctx->uc_stack.ss_sp,
                                    next_ctx->uc_stack.ss_size);
@@ -287,7 +287,7 @@ again:
     } else {
       void *fake_stack;
       size_t fake_stack_size;
-      puts("finishing fiber switch");
+      // puts("finishing fiber switch");
       __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
                                       (const void **) &fake_stack, &fake_stack_size);
     }
