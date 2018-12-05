@@ -398,8 +398,10 @@ void BufferChannel::NotifyAll(Scheduler::Queue *q)
   }
 }
 
-void BufferChannel::Flush()
+void BufferChannel::Flush(bool async)
 {
+  if (async) return;
+
   mutex.lock();
   while (bufsz > 0) {
     Scheduler::Current()->RunNext(Scheduler::SleepState, &wsleep_q, &mutex);
@@ -426,6 +428,7 @@ void TcpSocket::InitTcpSocket(size_t in_buffer_size, size_t out_buffer_size, int
   for (int i = 0; i < kNrQueues; i++) {
     wait_queues[i].ready = false;
     wait_queues[i].q.Init();
+    omit_lock_queues[i] = false;
   }
   this->fd = fd;
 
@@ -839,7 +842,7 @@ bool TcpOutputChannel::Write(const void *data, size_t cnt)
   return true;
 }
 
-void TcpOutputChannel::Flush()
+void TcpOutputChannel::Flush(bool async)
 {
   auto q = &sock->wait_queues[TcpSocket::WriteQueue];
   std::mutex *l = sock->wait_queue_lock(TcpSocket::WriteQueue);
@@ -851,10 +854,17 @@ void TcpOutputChannel::Flush()
     }
 
     int fd = sock->fd;
-    q->buffer->WriteTo([fd](struct iovec *iov, size_t iovcnt) {
-        return ::writev(fd, iov, iovcnt);
+    bool done = false;
+    while (q->buffer->buffer_size() > 0 && !done) {
+      q->buffer->WriteTo([fd, &done](struct iovec *iov, size_t iovcnt) {
+        auto rs = ::writev(fd, iov, iovcnt);
+        if (rs < 0 && errno == EAGAIN)
+          done = true;
+        return rs;
       });
+    }
     if (q->buffer->buffer_size() == 0) break;
+    if (async) break;
 
     sock->network_event_source()->WatchSocket(sock, EPOLLOUT);
     Scheduler::Current()->RunNext(Scheduler::SleepState, &q->q, l);

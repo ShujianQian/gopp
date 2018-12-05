@@ -89,7 +89,8 @@ class Scheduler {
   };
   void RunNext(State state, Queue *q = nullptr, std::mutex *sleep_lock = nullptr);
   void CollectGarbage();
-  void WakeUp(Routine *r, bool batch = false);
+  void WakeUp(Routine *r = nullptr, bool batch = false);
+  void WakeUp(Routine **routines, size_t nr_routines, bool batch = false);
 
   void StartRoutineStub();
 
@@ -136,6 +137,7 @@ class Routine : public ScheduleEntity {
   bool reuse;
   bool urgent;
   bool share;
+  bool busy_poll;
 
   friend class Scheduler;
   friend void InitThreadPool(int);
@@ -155,6 +157,8 @@ class Routine : public ScheduleEntity {
   void VoluntarilyPreempt(bool urgent);
   void set_reuse(bool r) { reuse = r; }
   void set_share(bool s) { share = s; }
+  void set_urgent(bool u) { urgent = u; }
+  void set_busy_poll(bool p) { busy_poll = p; }
   bool is_share() const { return share; }
   void *userdata() const { return user_data; }
   void set_userdata(void *p) { user_data = p; }
@@ -204,7 +208,7 @@ class InputChannel {
 class OutputChannel {
   virtual bool Write(const void *data, size_t cnt) = 0;
   // Wait until everything in the buffer is written.
-  virtual void Flush() = 0;
+  virtual void Flush(bool async = false) = 0;
   virtual void Close() = 0;
 };
 

@@ -23,7 +23,7 @@ class BufferChannel : public InputChannel, public OutputChannel {
 
   bool Read(void *data, size_t cnt) final;
   bool Write(const void *data, size_t cnt) final;
-  void Flush() final;
+  void Flush(bool async = false) final;
   void Close() final;
  private:
   void NotifyAll(Scheduler::Queue *q);
@@ -51,6 +51,7 @@ class TcpSocket : public Event {
   };
 
   WaitQueue wait_queues[kNrQueues];
+  bool omit_lock_queues[kNrQueues];
 
   enum QueueEnum : int {
     ReadQueue,
@@ -94,6 +95,8 @@ class TcpSocket : public Event {
   virtual ~TcpSocket();
 
   bool Pin();
+  void OmitReadLock() { omit_lock_queues[ReadQueue] = true; }
+  void OmitWriteLock() { omit_lock_queues[WriteQueue] = true; }
   bool Connect(std::string address, int port);
   bool Bind(std::string address, int port);
   bool Listen(int backlog = 128);
@@ -116,16 +119,17 @@ class TcpSocket : public Event {
         sched->event_source(EventSourceTypes::NetworkEventSourceType);
   }
   std::mutex *wait_queue_lock(int qid) {
-    std::mutex *l = nullptr;
-    if (!pinned) {
-      l = &wait_queues[qid].mutex;
-    } else {
+    if (pinned) {
       if (go::Scheduler::Current() != sched) {
         fprintf(stderr, "Pinned socket does not support concurrent access!");
         std::abort();
       }
+      return nullptr;
+    } else if (omit_lock_queues[qid]) {
+      return nullptr;
+    } else {
+      return &wait_queues[qid].mutex;
     }
-    return l;
   }
   friend class NetworkEventSource;
 };
@@ -165,7 +169,7 @@ class TcpOutputChannel : public OutputChannel {
 
  public:
   bool Write(const void *data, size_t cnt) final;
-  void Flush() final;
+  void Flush(bool async = false) final;
   void Close() final;
 };
 

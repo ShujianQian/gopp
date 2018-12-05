@@ -38,6 +38,7 @@ class ScheduleEventSource : public EventSource {
   void OnEvent(Event *evt) final;
   bool ReactEvents() final;
   void SendEvents(Routine *r, bool notify = false);
+  void SendEvents(Routine **routines, size_t nr_routines, bool notify);
  private:
   static void Initialize();
   friend void InitThreadPool(int);
@@ -171,6 +172,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
   bool stack_reuse = false;
   bool should_delete_old = false;
+  bool busy_poll = false;
 
   mutex.lock();
 
@@ -199,6 +201,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
       should_delete_old = true;
     }
     delay_garbage_ctx = old->ctx;
+    busy_poll = current->busy_poll;
     // fprintf(stderr, "ctx %p is garbage now, ss_sp %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
   }
   old_ctx = old->ctx;
@@ -209,7 +212,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
 again:
   auto ent = ready_q.next;
 
-  if (ent != &ready_q) {
+  if (!busy_poll && ent != &ready_q) {
     next = (Routine *) ent;
     if (!next->ctx) {
 #if __has_feature(address_sanitizer)
@@ -228,16 +231,25 @@ again:
     }
     next->Detach();
   } else {
-    for (auto event_source: sources) {
-      if (event_source->ReactEvents()) goto again;
+    int timeout = -1;
+    if (busy_poll && ent != &ready_q) {
+      timeout = 0;
+      busy_poll = false;
+    } else {
+      for (auto event_source : sources) {
+        if (event_source->ReactEvents())
+          goto again;
+      }
     }
     waiting = true;
     mutex.unlock();
     // All effort to react previous handled events failed, we really need to
     // poll for new events
-    // fprintf(stderr, "epoll_wait()\n");
+    // fprintf(stderr, "pool id %d epoll_wait()\n", tls_thread_pool_id);
+
+
  epoll_again:
-    int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, -1);
+    int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, timeout);
     if (rs < 0 && errno != EINTR) {
       perror("epoll");
       std::abort();
@@ -251,7 +263,7 @@ again:
       sources[e->event_source_type]->OnEvent(e);
     }
 
-    // fprintf(stderr, "epoll_awake\n");
+    // fprintf(stderr, "pool id %d epoll_awake\n", tls_thread_pool_id);
     mutex.lock();
     waiting = false;
 
@@ -298,8 +310,13 @@ again:
 
 void Scheduler::WakeUp(Routine *r, bool batch)
 {
-  r->sched = this;
+  // if (r) r->sched = this;
   ((ScheduleEventSource *) sources[ScheduleEventSourceType])->SendEvents(r, !batch);
+}
+
+void Scheduler::WakeUp(Routine **routines, size_t nr_routines, bool batch)
+{
+  ((ScheduleEventSource *) sources[ScheduleEventSourceType])->SendEvents(routines, nr_routines, !batch);
 }
 
 void Scheduler::CollectGarbage()
@@ -374,6 +391,18 @@ run_idle:
 
 void ScheduleEventSource::SendEvents(Routine *r, bool notify)
 {
+  uint64_t u = 1;
+  if (r == nullptr && notify) {
+    LockScheduler(nullptr);
+    if (sched_is_waiting()) {
+      if (write(fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
+        perror("write to event fd");
+        std::abort();
+      }
+    }
+    UnlockScheduler(nullptr);
+    return;
+  }
   auto old_sched = r->scheduler();
   LockScheduler(old_sched);
   r->Detach();
@@ -384,7 +413,6 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
     r->AddToReadyQueue(&share_q);
 
     if (notify) {
-      uint64_t u = 1;
       if (write(share_fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
         perror("write to share event fd");
         std::abort();
@@ -394,7 +422,6 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
     r->AddToReadyQueue(sched_ready_queue());
 
     if (notify && sched_is_waiting()) {
-      uint64_t u = 1;
       if (write(fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
         perror("write to event fd");
         std::abort();
@@ -402,6 +429,33 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
     }
   }
   UnlockScheduler(old_sched);
+}
+
+void ScheduleEventSource::SendEvents(Routine **routines, size_t nr_routines, bool notify)
+{
+  for (int i = 0; i < nr_routines; i++) {
+    if (routines[i]->scheduler() != nullptr || routines[i]->is_share()) {
+      fprintf(stderr, "Cannot add in batch when some routines belong to other schedulers\n");
+      std::abort();
+    }
+  }
+  LockScheduler(nullptr);
+
+  for (int i = 0; i < nr_routines; i++) {
+    routines[i]->set_scheduler(sched);
+    routines[i]->AddToReadyQueue(sched_ready_queue());
+  }
+
+  uint64_t u = 0;
+
+  if (notify && sched_is_waiting()) {
+    if (write(fd, &u, sizeof(uint64_t)) < sizeof(uint64_t)) {
+      perror("write to event fd");
+      std::abort();
+    }
+  }
+
+  UnlockScheduler(nullptr);
 }
 
 int ScheduleEventSource::share_fd;
