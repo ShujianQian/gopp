@@ -275,6 +275,7 @@ again:
   current = next;
   // l.unlock();
 
+  __builtin_prefetch(this);
   if (stack_reuse) {
     // puts("Fast switch");
     setmcontext_light(&next_ctx->uc_mcontext);

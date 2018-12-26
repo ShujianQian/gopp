@@ -78,6 +78,8 @@ class Scheduler {
   int epoll_fd;
   struct epoll_event kernel_events[kNrEpollKernelEvents];
 
+  unsigned char __padding__[48];
+
   Scheduler(Routine *r);
   ~Scheduler();
  public:
@@ -138,6 +140,7 @@ class Routine : public ScheduleEntity {
   bool urgent;
   bool share;
   bool busy_poll;
+  unsigned char __padding__[8];
 
   friend class Scheduler;
   friend void InitThreadPool(int);
@@ -163,8 +166,9 @@ class Routine : public ScheduleEntity {
   void *userdata() const { return user_data; }
   void set_userdata(void *p) { user_data = p; }
 
-  // internal use
   Scheduler *scheduler() const { return sched; }
+
+  // internal use
   void set_scheduler(Scheduler *v) { sched = v; }
   void AddToReadyQueue(Scheduler::Queue *q) {
     if (urgent)
@@ -180,6 +184,8 @@ class Routine : public ScheduleEntity {
   void InitStack(Scheduler *sched, size_t stack_size);
   void InitFromGarbageContext(ucontext *c, Scheduler *sched, void *sp);
 };
+
+static_assert(sizeof(Routine) % 64 == 0, "Cacheline should be aligned");
 
 template <class T>
 class GenericRoutine : public Routine {
