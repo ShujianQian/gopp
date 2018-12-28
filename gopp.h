@@ -76,7 +76,7 @@ class Scheduler {
 
   static const int kNrEpollKernelEvents = 32;
   int epoll_fd;
-  struct epoll_event kernel_events[kNrEpollKernelEvents];
+  int pool_id;
 
   unsigned char __padding__[48];
 
@@ -97,12 +97,15 @@ class Scheduler {
   void StartRoutineStub();
 
   Routine *current_routine() const { return current; }
+  int thread_pool_id() const { return pool_id; }
 
   EventSource *event_source(int idx) const { return sources[idx]; }
 
   static Scheduler *Current();
   static int CurrentThreadPoolId();
 };
+
+static_assert(sizeof(Scheduler) % 64 == 0, "Must aligned to Cacheline");
 
 class EventSource {
  protected:
@@ -170,12 +173,13 @@ class Routine : public ScheduleEntity {
 
   // internal use
   void set_scheduler(Scheduler *v) { sched = v; }
-  void AddToReadyQueue(Scheduler::Queue *q) {
+  virtual void AddToReadyQueue(Scheduler::Queue *q) {
     if (urgent)
       Add(q);
     else
       Add(q->prev);
   }
+  virtual void OnDetached() {}
 
   virtual void Run() = 0;
   void Run0();

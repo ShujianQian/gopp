@@ -120,6 +120,7 @@ Scheduler::Scheduler(Routine *r)
     perror("epoll_create");
     std::abort();
   }
+  pool_id = -1;
 
   sources.push_back(new ScheduleEventSource(this));
   sources.push_back(new NetworkEventSource(this));
@@ -192,7 +193,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
     if (sleep_lock)
       sleep_lock->unlock();
   } else if (state == ReadyState) {
-    old->Add(ready_q.prev);
+    old->AddToReadyQueue(&ready_q);
   } else if (state == NextReadyState) {
     old->Add(ready_q.next);
   } else if (state == ExitState) {
@@ -230,6 +231,7 @@ again:
 #endif
     }
     next->Detach();
+    next->OnDetached();
   } else {
     int timeout = -1;
     if (busy_poll && ent != &ready_q) {
@@ -249,6 +251,7 @@ again:
 
 
  epoll_again:
+    struct epoll_event kernel_events[kNrEpollKernelEvents];
     int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, timeout);
     if (rs < 0 && errno != EINTR) {
       perror("epoll");
@@ -512,6 +515,7 @@ void InitThreadPool(int nr_threads)
 	  idle_routine->Detach();
 
           auto sched = new Scheduler(idle_routine);
+          sched->pool_id = i;
           tls_thread_pool_id = i;
           g_schedulers[tls_thread_pool_id] = sched;
 
