@@ -667,6 +667,13 @@ std::string TcpSocket::host() const
   }
 }
 
+void TcpSocket::Migrate(Scheduler *to_sched)
+{
+  network_event_source()->RemoveSocket(this);
+  sched = to_sched;
+  network_event_source()->AddSocket(this);
+}
+
 NetworkEventSource::NetworkEventSource(Scheduler *sched)
     : EventSource(sched)
 {

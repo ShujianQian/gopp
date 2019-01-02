@@ -110,6 +110,8 @@ class TcpSocket : public Event {
   TcpInputChannel *input_channel() { return in_chan; }
   TcpOutputChannel *output_channel() { return out_chan; }
 
+  void Migrate(Scheduler *sch);
+
   virtual void OnError();
  private:
   void Wait(int qid);

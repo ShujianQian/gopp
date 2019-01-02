@@ -103,6 +103,23 @@ void Routine::Reset()
   ctx = nullptr;
 }
 
+void Routine::AddToReadyQueue(Scheduler::Queue *q, bool next_ready)
+{
+  if (next_ready) {
+    auto p = q->next;
+    if (p == q || !((Routine *) p)->urgent) {
+      Add(p);
+    } else {
+      while (p != q && ((Routine *) p)->urgent) p = p->next;
+      Add(p->prev);
+    }
+  } else if (urgent) {
+    Add(q);
+  } else {
+    Add(q->prev);
+  }
+}
+
 void Routine::VoluntarilyPreempt(bool urgent)
 {
   if (urgent)
@@ -195,7 +212,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   } else if (state == ReadyState) {
     old->AddToReadyQueue(&ready_q);
   } else if (state == NextReadyState) {
-    old->Add(ready_q.next);
+    old->AddToReadyQueue(ready_q.next, true);
   } else if (state == ExitState) {
     if (current == idle) std::abort();
     if (!old->reuse) {
@@ -231,7 +248,7 @@ again:
 #endif
     }
     next->Detach();
-    next->OnDetached();
+    next->OnRemoveFromReadyQueue();
   } else {
     int timeout = -1;
     if (busy_poll && ent != &ready_q) {
@@ -249,7 +266,6 @@ again:
     // poll for new events
     // fprintf(stderr, "pool id %d epoll_wait()\n", tls_thread_pool_id);
 
-
  epoll_again:
     struct epoll_event kernel_events[kNrEpollKernelEvents];
     int rs = epoll_wait(epoll_fd, kernel_events, kNrEpollKernelEvents, timeout);
@@ -266,7 +282,7 @@ again:
       sources[e->event_source_type]->OnEvent(e);
     }
 
-    // fprintf(stderr, "pool id %d epoll_awake\n", tls_thread_pool_id);
+    // fprintf(stderr, "pool id %d epoll_awake. %d events\n", tls_thread_pool_id, rs);
     mutex.lock();
     waiting = false;
 

@@ -164,6 +164,7 @@ class Routine : public ScheduleEntity {
   void set_reuse(bool r) { reuse = r; }
   void set_share(bool s) { share = s; }
   void set_urgent(bool u) { urgent = u; }
+  bool is_urgent() const { return urgent; }
   void set_busy_poll(bool p) { busy_poll = p; }
   bool is_share() const { return share; }
   void *userdata() const { return user_data; }
@@ -173,13 +174,8 @@ class Routine : public ScheduleEntity {
 
   // internal use
   void set_scheduler(Scheduler *v) { sched = v; }
-  virtual void AddToReadyQueue(Scheduler::Queue *q) {
-    if (urgent)
-      Add(q);
-    else
-      Add(q->prev);
-  }
-  virtual void OnDetached() {}
+  virtual void AddToReadyQueue(Scheduler::Queue *q, bool next_ready = false);
+  virtual void OnRemoveFromReadyQueue() {}
 
   virtual void Run() = 0;
   void Run0();
