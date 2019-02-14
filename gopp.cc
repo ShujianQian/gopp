@@ -190,7 +190,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
   bool stack_reuse = false;
   bool should_delete_old = false;
-  bool busy_poll = false;
+  bool busy_poll = current->busy_poll;
 
   mutex.lock();
 
@@ -219,7 +219,6 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
       should_delete_old = true;
     }
     delay_garbage_ctx = old->ctx;
-    busy_poll = current->busy_poll;
     // fprintf(stderr, "ctx %p is garbage now, ss_sp %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
   }
   old_ctx = old->ctx;
