@@ -41,7 +41,7 @@ class ScheduleEventSource : public EventSource {
   void SendEvents(Routine **routines, size_t nr_routines, bool notify);
  private:
   static void Initialize();
-  friend void InitThreadPool(int);
+  friend void InitThreadPool(int, RoutineStackAllocator *);
   friend void WaitThreadPool();
 };
 
@@ -66,11 +66,33 @@ static void routine_func(void *r)
   ((Routine *) r)->Run0();
 }
 
-void Routine::InitStack(Scheduler *sched, size_t stack_size)
+const size_t RoutineStackAllocator::kContextSize = sizeof(ucontext_t);
+
+void RoutineStackAllocator::AllocateStackAndContext(size_t &stack_size,
+                                                    ucontext * &ctx_ptr, void * &stack_ptr)
+{
+  stack_size = kDefaultStackSize;
+  ctx_ptr = (ucontext *) calloc(1, sizeof(ucontext_t));
+  stack_ptr = malloc(kDefaultStackSize);
+}
+
+void RoutineStackAllocator::FreeStackAndContext(ucontext *ctx_ptr, void *stack_ptr)
+{
+  free(ctx_ptr);
+  free(stack_ptr);
+}
+
+static RoutineStackAllocator *g_allocator;
+
+void Routine::InitStack(Scheduler *sched)
 {
   ctx = (ucontext *) calloc(1, sizeof(ucontext_t));
-  ctx->uc_stack.ss_sp = malloc(stack_size);
-  ctx->uc_stack.ss_size = stack_size;
+  void *stack = nullptr;
+  size_t stack_size = 0;
+  g_allocator->AllocateStackAndContext(stack_size, ctx, stack);
+
+  ctx->uc_stack.ss_sp = stack;
+  ctx->uc_stack.ss_size = stack_size;;
   ctx->uc_stack.ss_flags = 0;
   ctx->uc_mcontext.mc_rip = sched->link_rip;
   ctx->uc_mcontext.mc_rbp = sched->link_rbp;
@@ -233,7 +255,7 @@ again:
     next = (Routine *) ent;
     if (!next->ctx) {
 #if __has_feature(address_sanitizer)
-      next->InitStack(this, Routine::kStackSize);
+      next->InitStack(this);
 #else
       if (delay_garbage_ctx) {
 	// reuse the stack and context memory
@@ -242,7 +264,7 @@ again:
 	delay_garbage_ctx = nullptr;
 	stack_reuse = true;
       } else {
-	next->InitStack(this, Routine::kStackSize);
+	next->InitStack(this);
       }
 #endif
     }
@@ -342,8 +364,7 @@ void Scheduler::CollectGarbage()
 {
   if (delay_garbage_ctx) {
     // fprintf(stderr, "Collecting %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
-    free(delay_garbage_ctx->uc_stack.ss_sp);
-    free(delay_garbage_ctx);
+    g_allocator->FreeStackAndContext(delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
     delay_garbage_ctx = nullptr;
   }
 }
@@ -507,8 +528,11 @@ void IdleRoutine::Run()
   }
 }
 
-void InitThreadPool(int nr_threads)
+void InitThreadPool(int nr_threads, RoutineStackAllocator *allocator)
 {
+  g_allocator = (allocator == nullptr)
+                ? new RoutineStackAllocator() : allocator;
+
   ScheduleEventSource::Initialize();
   std::atomic<int> nr_up(0);
   g_schedulers.resize(nr_threads + 1, nullptr);

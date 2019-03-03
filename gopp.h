@@ -52,6 +52,15 @@ struct Event {
 
 class EventSource;
 
+class RoutineStackAllocator {
+ public:
+  static const size_t kDefaultStackSize = (8UL << 20);
+  static const size_t kContextSize;
+
+  virtual void AllocateStackAndContext(size_t &stack_size, ucontext * &ctx_ptr, void * &stack_ptr);
+  virtual void FreeStackAndContext(ucontext *ctx_ptr, void *stack_ptr);
+};
+
 class Scheduler {
  public:
   typedef ScheduleEntity Queue;
@@ -59,7 +68,7 @@ class Scheduler {
   friend class Routine;
   friend class EventSource;
 
-  friend void InitThreadPool(int);
+  friend void InitThreadPool(int, RoutineStackAllocator *);
   friend void WaitThreadPool();
 
   std::mutex mutex;
@@ -150,8 +159,6 @@ class Routine : public ScheduleEntity {
   friend void WaitThreadPool();
  public:
 
-  static const size_t kStackSize = (8UL << 20);
-
   Routine();
   virtual ~Routine() {}
 
@@ -181,7 +188,7 @@ class Routine : public ScheduleEntity {
   void Run0();
 
  protected:
-  void InitStack(Scheduler *sched, size_t stack_size);
+  void InitStack(Scheduler *sched);
   void InitFromGarbageContext(ucontext *c, Scheduler *sched, void *sp);
 };
 
@@ -202,7 +209,7 @@ Routine *Make(const T &obj)
   return new GenericRoutine<T>(obj);
 }
 
-void InitThreadPool(int nr_threads = 1);
+void InitThreadPool(int nr_threads = 1, RoutineStackAllocator *allocator = nullptr);
 void WaitThreadPool();
 
 Scheduler *GetSchedulerFromPool(int thread_id);
