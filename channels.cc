@@ -332,6 +332,19 @@ static void CheckCapacity(const char *op, size_t capacity, size_t cnt, size_t bu
   }
 }
 
+size_t BufferChannel::Poll()
+{
+  size_t sz = 0;
+  mutex.lock();
+  while (bufsz == 0) {
+    Scheduler::Current()->RunNext(Scheduler::SleepState, &rsleep_q, &mutex);
+    mutex.lock();
+  }
+  sz = bufsz;
+  mutex.unlock();
+  return sz;
+}
+
 bool BufferChannel::Read(void *data, size_t cnt)
 {
   CheckCapacity(__FUNCTION__, capacity, cnt, bufsz);
@@ -775,6 +788,22 @@ TcpOutputChannel::TcpOutputChannel(size_t buffer_size, go::TcpSocket *sock)
 TcpOutputChannel::~TcpOutputChannel()
 {
   delete q->buffer;
+}
+
+size_t TcpInputChannel::Poll()
+{
+  size_t sz;
+  auto q = &sock->wait_queues[TcpSocket::ReadQueue];
+  std::mutex *l = sock->wait_queue_lock(TcpSocket::ReadQueue);
+  if (l) l->lock();
+  while (q->buffer->buffer_size() == 0) {
+    sock->network_event_source()->WatchSocket(sock, EPOLLIN);
+    Scheduler::Current()->RunNext(Scheduler::SleepState, &q->q, l);
+    if (l) l->lock();
+  }
+  sz = q->buffer->buffer_size();
+  if (l) l->unlock();
+  return sz;
 }
 
 bool TcpInputChannel::Read(void *data, size_t cnt)

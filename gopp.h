@@ -215,6 +215,7 @@ void WaitThreadPool();
 Scheduler *GetSchedulerFromPool(int thread_id);
 
 class InputChannel {
+  virtual size_t Poll() = 0;
   virtual bool Read(void *data, size_t cnt) = 0;
 };
 

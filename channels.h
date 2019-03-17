@@ -21,10 +21,11 @@ class BufferChannel : public InputChannel, public OutputChannel {
   BufferChannel(size_t buffer_size);
   ~BufferChannel();
 
-  bool Read(void *data, size_t cnt) final;
-  bool Write(const void *data, size_t cnt) final;
-  void Flush(bool async = false) final;
-  void Close() final;
+  size_t Poll() override final;
+  bool Read(void *data, size_t cnt) override final;
+  bool Write(const void *data, size_t cnt) override final;
+  void Flush(bool async = false) override final;
+  void Close() override final;
  private:
   void NotifyAll(Scheduler::Queue *q);
 
@@ -140,8 +141,8 @@ class NetworkEventSource : public EventSource {
  public:
   NetworkEventSource(Scheduler *sched);
 
-  void OnEvent(Event *evt) final;
-  bool ReactEvents() final { return false; };
+  void OnEvent(Event *evt) override final;
+  bool ReactEvents() override final { return false; };
 
   void AddSocket(TcpSocket *sock);
   void RemoveSocket(TcpSocket *sock);
@@ -157,8 +158,8 @@ class TcpInputChannel : public InputChannel {
   TcpInputChannel(size_t buffer_size, TcpSocket *sock);
   virtual ~TcpInputChannel();
  public:
-
-  bool Read(void *data, size_t cnt) final;
+  size_t Poll() override final;
+  bool Read(void *data, size_t cnt) override final;
 };
 
 class TcpOutputChannel : public OutputChannel {
@@ -170,9 +171,9 @@ class TcpOutputChannel : public OutputChannel {
   virtual ~TcpOutputChannel();
 
  public:
-  bool Write(const void *data, size_t cnt) final;
-  void Flush(bool async = false) final;
-  void Close() final;
+  bool Write(const void *data, size_t cnt) override final;
+  void Flush(bool async = false) override final;
+  void Close() override final;
 };
 
 }
