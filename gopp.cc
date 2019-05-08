@@ -86,7 +86,7 @@ static RoutineStackAllocator *g_allocator;
 
 void Routine::InitStack(Scheduler *sched)
 {
-  ctx = (ucontext *) calloc(1, sizeof(ucontext_t));
+  // ctx = (ucontext *) calloc(1, sizeof(ucontext_t));
   void *stack = nullptr;
   size_t stack_size = 0;
   g_allocator->AllocateStackAndContext(stack_size, ctx, stack);
