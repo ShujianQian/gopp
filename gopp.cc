@@ -237,16 +237,17 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
     old->AddToReadyQueue(ready_q.next, true);
   } else if (state == ExitState) {
     if (current == idle) std::abort();
-    if (!old->reuse) {
-      should_delete_old = true;
-    }
+    should_delete_old = true;
     delay_garbage_ctx = old->ctx;
     // fprintf(stderr, "ctx %p is garbage now, ss_sp %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
   }
   old_ctx = old->ctx;
 
   // if (state == ExitState) old->ctx = nullptr;
-  if (should_delete_old) delete old;
+  if (should_delete_old) {
+    if (old->reuse) old->OnFinish();
+    else delete old;
+  }
 
 again:
   auto ent = ready_q.next;

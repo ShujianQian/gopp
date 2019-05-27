@@ -183,6 +183,7 @@ class Routine : public ScheduleEntity {
   void set_scheduler(Scheduler *v) { sched = v; }
   virtual void AddToReadyQueue(Scheduler::Queue *q, bool next_ready = false);
   virtual void OnRemoveFromReadyQueue() {}
+  virtual void OnFinish() {}
 
   virtual void Run() = 0;
   void Run0();
