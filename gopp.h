@@ -216,11 +216,13 @@ void WaitThreadPool();
 Scheduler *GetSchedulerFromPool(int thread_id);
 
 class InputChannel {
+ public:
   virtual size_t Poll() = 0;
   virtual bool Read(void *data, size_t cnt) = 0;
 };
 
 class OutputChannel {
+ public:
   virtual bool Write(const void *data, size_t cnt) = 0;
   // Wait until everything in the buffer is written.
   virtual void Flush(bool async = false) = 0;
