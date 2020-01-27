@@ -7,7 +7,6 @@
 #include <fcntl.h>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
 #include "channels.h"
 
 namespace go {
@@ -67,8 +66,12 @@ class IOBuffer {
   ~IOBuffer();
 
   static const size_t kBatchIOSize = 256 << 10;
-  bool ReadFrom(std::function<int (struct iovec *, int)> callback);
-  void WriteTo(std::function<int (struct iovec *, int)> callback);
+
+  template <typename Func>
+  bool ReadFrom(Func callback);
+
+  template <typename Func>
+  void WriteTo(Func callback);
 
   void Pop(void *data, size_t cnt);
   void Push(const void *data, size_t cnt);
@@ -163,7 +166,8 @@ void IOBuffer::Shrink(size_t delta, bool front)
   // fprintf(stderr, "Shrink: offset %d size %d\n", offset, size);
 }
 
-bool IOBuffer::ReadFrom(std::function<int (struct iovec *, int)> callback)
+template <typename Func>
+bool IOBuffer::ReadFrom(Func callback)
 {
   size_t iosize = std::min(max_grow_back_space(), kBatchIOSize);
   struct iovec iov[kBatchIOSize / kPageSize + 1];
@@ -213,7 +217,8 @@ shrink:
   return !eof;
 }
 
-void IOBuffer::WriteTo(std::function<int (struct iovec *, int)> callback)
+template <typename Func>
+void IOBuffer::WriteTo(Func callback)
 {
   size_t iosize = std::min(kBatchIOSize, size);
   struct iovec iov[kBatchIOSize / kPageSize + 1];
