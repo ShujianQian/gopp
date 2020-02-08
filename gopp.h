@@ -217,8 +217,12 @@ Scheduler *GetSchedulerFromPool(int thread_id);
 
 class InputChannel {
  public:
-  virtual size_t Poll() = 0;
   virtual bool Read(void *data, size_t cnt) = 0;
+
+  // Advanced peeking API.
+  virtual void BeginPeek() {}
+  virtual size_t Peek(void *data, size_t cnt) { return 0; }
+  virtual void EndPeek(size_t cnt) {}
 };
 
 class OutputChannel {

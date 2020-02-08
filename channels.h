@@ -21,8 +21,12 @@ class BufferChannel : public InputChannel, public OutputChannel {
   BufferChannel(size_t buffer_size);
   ~BufferChannel();
 
-  size_t Poll() override final;
   bool Read(void *data, size_t cnt) override final;
+
+  void BeginPeek() override final;
+  size_t Peek(void *data, size_t cnt) override final;
+  void EndPeek(size_t cnt) override final;
+
   bool Write(const void *data, size_t cnt) override final;
   void Flush(bool async = false) override final;
   void Close() override final;
@@ -157,8 +161,14 @@ class TcpInputChannel : public InputChannel {
 
   TcpInputChannel(size_t buffer_size, TcpSocket *sock);
   virtual ~TcpInputChannel();
+
+  void OpportunisticReadFromNetwork();
+
  public:
-  size_t Poll() override final;
+  void BeginPeek() override final;
+  size_t Peek(void *data, size_t cnt) override final;
+  void EndPeek(size_t cnt) override final;
+
   bool Read(void *data, size_t cnt) override final;
 };
 

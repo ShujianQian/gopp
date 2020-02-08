@@ -53,17 +53,17 @@ class IOBuffer {
   void Grow(size_t delta, bool front);
   void Shrink(size_t delta, bool front);
 
-  void GrowBack(size_t delta) { Grow(delta, false); }
-  void GrowFront(size_t delta) { Grow(delta, true); }
-  void ShrinkBack(size_t delta) { Shrink(delta, false); }
-  void ShrinkFront(size_t delta) { Shrink(delta, true); }
-
  public:
 
   static const size_t kPageSize = 4096;
 
   IOBuffer(size_t capacity);
   ~IOBuffer();
+
+  void GrowBack(size_t delta) { Grow(delta, false); }
+  void GrowFront(size_t delta) { Grow(delta, true); }
+  void ShrinkBack(size_t delta) { Shrink(delta, false); }
+  void ShrinkFront(size_t delta) { Shrink(delta, true); }
 
   static const size_t kBatchIOSize = 256 << 10;
 
@@ -73,6 +73,7 @@ class IOBuffer {
   template <typename Func>
   void WriteTo(Func callback);
 
+  size_t Peek(void *data, size_t cnt);
   void Pop(void *data, size_t cnt);
   void Push(const void *data, size_t cnt);
 
@@ -262,21 +263,40 @@ shrink:
   ShrinkFront(rs);
 }
 
+size_t IOBuffer::Peek(void *data, size_t cnt)
+{
+  uint8_t *p = (uint8_t *) data;
+  size_t acc = 0;
+  WriteTo(
+      [p, cnt, &acc](struct iovec *iov, int iovcnt) -> int {
+        for (int i = 0; i < iovcnt && acc < cnt; i++) {
+          size_t len = std::min(iov[i].iov_len, cnt - acc);
+          memcpy(p + acc, iov[i].iov_base, len);
+          acc += len;
+        }
+        // Don't call ShrinkFront() after WriteTo().
+        errno = EAGAIN;
+        return -1;
+      });
+  return acc;
+}
+
 void IOBuffer::Pop(void *data, size_t cnt)
 {
   size_t acc = 0;
   uint8_t *p = (uint8_t *) data;
   while (acc < cnt) {
-    WriteTo([p, cnt, &acc](struct iovec *iov, int iovcnt) -> int {
-        size_t perround_acc = 0;
-        for (int i = 0; i < iovcnt && acc < cnt; i++) {
-          size_t len = std::min(iov[i].iov_len, cnt - acc);
-          memcpy(p + acc, iov[i].iov_base, len);
-          acc += len;
-          perround_acc += len;
-        }
-        return perround_acc;
-      });
+    WriteTo(
+        [p, cnt, &acc](struct iovec *iov, int iovcnt) -> int {
+          size_t perround_acc = 0;
+          for (int i = 0; i < iovcnt && acc < cnt; i++) {
+            size_t len = std::min(iov[i].iov_len, cnt - acc);
+            memcpy(p + acc, iov[i].iov_base, len);
+            acc += len;
+            perround_acc += len;
+          }
+          return perround_acc;
+        });
   }
 }
 
@@ -337,17 +357,35 @@ static void CheckCapacity(const char *op, size_t capacity, size_t cnt, size_t bu
   }
 }
 
-size_t BufferChannel::Poll()
+void BufferChannel::BeginPeek()
 {
-  size_t sz = 0;
   mutex.lock();
-  while (bufsz == 0) {
-    Scheduler::Current()->RunNext(Scheduler::SleepState, &rsleep_q, &mutex);
-    mutex.lock();
+}
+
+size_t BufferChannel::Peek(void *data, size_t cnt)
+{
+  if (small_buffer) {
+    size_t len = std::min(cnt, bufsz);
+    memcpy(data, small_buffer, len);
+    return len;
   }
-  sz = bufsz;
+
+  if (large_buffer) {
+    return large_buffer->Peek(data, cnt);
+  }
+
+  std::abort();
+}
+
+void BufferChannel::EndPeek(size_t cnt)
+{
+  if (small_buffer) {
+    if (bufsz >= cnt) bufsz -= cnt;
+  }
+  if (large_buffer) {
+    large_buffer->ShrinkFront(cnt);
+  }
   mutex.unlock();
-  return sz;
 }
 
 bool BufferChannel::Read(void *data, size_t cnt)
@@ -795,20 +833,43 @@ TcpOutputChannel::~TcpOutputChannel()
   delete q->buffer;
 }
 
-size_t TcpInputChannel::Poll()
+void TcpInputChannel::OpportunisticReadFromNetwork()
 {
-  size_t sz;
-  auto q = &sock->wait_queues[TcpSocket::ReadQueue];
+  int fd = sock->fd;
+  bool success = !sock->has_error;
+  bool done = false;
+  while (success && !done && q->buffer->max_grow_back_space() > 0) {
+    success = q->buffer->ReadFrom(
+        [fd, &done](struct iovec *iov, size_t iovcnt) {
+          auto rs = ::readv(fd, iov, iovcnt);
+          if (rs < 0 && errno == EAGAIN)
+            done = true;
+          return rs;
+        });
+  }
+}
+
+void TcpInputChannel::BeginPeek()
+{
   std::mutex *l = sock->wait_queue_lock(TcpSocket::ReadQueue);
   if (l) l->lock();
-  while (q->buffer->buffer_size() == 0) {
-    sock->network_event_source()->WatchSocket(sock, EPOLLIN);
-    Scheduler::Current()->RunNext(Scheduler::SleepState, &q->q, l);
-    if (l) l->lock();
+}
+
+size_t TcpInputChannel::Peek(void *data, size_t cnt)
+{
+  if (q->buffer->buffer_size() < cnt) {
+    OpportunisticReadFromNetwork();
   }
-  sz = q->buffer->buffer_size();
+
+  return q->buffer->Peek(data, cnt);
+}
+
+void TcpInputChannel::EndPeek(size_t cnt)
+{
+  q->buffer->ShrinkFront(cnt);
+
+  std::mutex *l = sock->wait_queue_lock(TcpSocket::ReadQueue);
   if (l) l->unlock();
-  return sz;
 }
 
 bool TcpInputChannel::Read(void *data, size_t cnt)
@@ -819,19 +880,10 @@ bool TcpInputChannel::Read(void *data, size_t cnt)
   if (l) l->lock();
 
   while (q->buffer->buffer_size() < cnt) {
-    int fd = sock->fd;
-    bool success = !sock->has_error;
-    bool done = false;
-    while (success && !done && q->buffer->max_grow_back_space() > 0) {
-      success = q->buffer->ReadFrom([fd, &done](struct iovec *iov, size_t iovcnt) {
-          auto rs = ::readv(fd, iov, iovcnt);
-          if (rs < 0 && errno == EAGAIN)
-            done = true;
-          return rs;
-        });
-    }
+    OpportunisticReadFromNetwork();
+
     if (q->buffer->buffer_size() >= cnt) break;
-    if (!success) {
+    if (sock->has_error) {
       if (l) l->unlock();
       return false;
     }
