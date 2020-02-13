@@ -377,14 +377,18 @@ size_t BufferChannel::Peek(void *data, size_t cnt)
   std::abort();
 }
 
-void BufferChannel::EndPeek(size_t cnt)
+void BufferChannel::Skip(size_t skip)
 {
   if (small_buffer) {
-    if (bufsz >= cnt) bufsz -= cnt;
+    if (bufsz >= skip) bufsz -= skip;
   }
   if (large_buffer) {
-    large_buffer->ShrinkFront(cnt);
+    large_buffer->ShrinkFront(skip);
   }
+}
+
+void BufferChannel::EndPeek()
+{
   mutex.unlock();
 }
 
@@ -864,10 +868,13 @@ size_t TcpInputChannel::Peek(void *data, size_t cnt)
   return q->buffer->Peek(data, cnt);
 }
 
-void TcpInputChannel::EndPeek(size_t cnt)
+void TcpInputChannel::Skip(size_t skip)
 {
-  q->buffer->ShrinkFront(cnt);
+  q->buffer->ShrinkFront(skip);
+}
 
+void TcpInputChannel::EndPeek()
+{
   std::mutex *l = sock->wait_queue_lock(TcpSocket::ReadQueue);
   if (l) l->unlock();
 }

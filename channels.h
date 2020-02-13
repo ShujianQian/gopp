@@ -25,7 +25,8 @@ class BufferChannel : public InputChannel, public OutputChannel {
 
   void BeginPeek() override final;
   size_t Peek(void *data, size_t cnt) override final;
-  void EndPeek(size_t cnt) override final;
+  void Skip(size_t skip) override final;
+  void EndPeek() override final;
 
   bool Write(const void *data, size_t cnt) override final;
   void Flush(bool async = false) override final;
@@ -167,7 +168,8 @@ class TcpInputChannel : public InputChannel {
  public:
   void BeginPeek() override final;
   size_t Peek(void *data, size_t cnt) override final;
-  void EndPeek(size_t cnt) override final;
+  void Skip(size_t skip) override final;
+  void EndPeek() override final;
 
   bool Read(void *data, size_t cnt) override final;
 };

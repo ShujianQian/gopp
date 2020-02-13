@@ -222,7 +222,8 @@ class InputChannel {
   // Advanced peeking API.
   virtual void BeginPeek() {}
   virtual size_t Peek(void *data, size_t cnt) { return 0; }
-  virtual void EndPeek(size_t cnt) {}
+  virtual void Skip(size_t skip) {}
+  virtual void EndPeek() {}
 };
 
 class OutputChannel {
