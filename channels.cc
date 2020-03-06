@@ -629,7 +629,7 @@ void TcpSocket::EnableReuse()
   }
 }
 
-TcpSocket *TcpSocket::Accept()
+TcpSocket *TcpSocket::Accept(size_t in_buffer_size, size_t out_buffer_size)
 {
   TcpSocket *result = new TcpSocket();
   int client_fd = 0;
@@ -647,8 +647,7 @@ again:
       return nullptr;
     }
   }
-  result->InitTcpSocket(in_chan->q->buffer->capacity(), out_chan->q->buffer->capacity(),
-                        client_fd, sched);
+  result->InitTcpSocket(in_buffer_size, out_buffer_size, client_fd, sched);
   return result;
 }
 

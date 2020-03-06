@@ -106,7 +106,7 @@ class TcpSocket : public Event {
   bool Connect(std::string address, int port);
   bool Bind(std::string address, int port);
   bool Listen(int backlog = 128);
-  TcpSocket *Accept();
+  TcpSocket *Accept(size_t in_buffer_size, size_t out_buffer_size);
   void Close();
 
   void EnableReuse();
@@ -163,9 +163,8 @@ class TcpInputChannel : public InputChannel {
   TcpInputChannel(size_t buffer_size, TcpSocket *sock);
   virtual ~TcpInputChannel();
 
-  void OpportunisticReadFromNetwork();
-
  public:
+  void OpportunisticReadFromNetwork();
   void BeginPeek() override final;
   size_t Peek(void *data, size_t cnt) override final;
   void Skip(size_t skip) override final;
