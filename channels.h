@@ -106,7 +106,7 @@ class TcpSocket : public Event {
   bool Connect(std::string address, int port);
   bool Bind(std::string address, int port);
   bool Listen(int backlog = 128);
-  TcpSocket *Accept(size_t in_buffer_size, size_t out_buffer_size);
+  TcpSocket *Accept(size_t in_buffer_size = 1024, size_t out_buffer_size = 1024);
   void Close();
 
   void EnableReuse();
