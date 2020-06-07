@@ -944,6 +944,8 @@ bool TcpOutputChannel::Write(const void *data, size_t cnt)
 void TcpOutputChannel::Flush(bool async)
 {
   auto q = &sock->wait_queues[TcpSocket::WriteQueue];
+  if (async && q->buffer->buffer_size() == 0) return;
+
   std::mutex *l = sock->wait_queue_lock(TcpSocket::WriteQueue);
   if (l) l->lock();
   while (q->buffer->buffer_size() > 0) {
