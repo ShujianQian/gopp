@@ -13,7 +13,7 @@
 #include <sys/time.h>
 
 #include "channels.h"
-#include "amd64-ucontext.h"
+#include "ucontext.h"
 
 #if __has_feature(address_sanitizer)
 
@@ -47,15 +47,15 @@ class ScheduleEventSource : public EventSource {
 
 void Routine::Run0()
 {
-#if __has_feature(address_sanitizer)
-  if (sched->prev_ctx) {
-    // puts("finishing switch fiber");
-    __sanitizer_finish_switch_fiber(ctx->asan_fake_stack,
-                                    (const void **) &sched->prev_ctx->uc_stack.ss_sp,
-                                    &sched->prev_ctx->uc_stack.ss_size);
-  }
-#endif
   sched->mutex.unlock();
+
+#if __has_feature(address_sanitizer)
+  const void *__asan_old_stack_bottom;
+  size_t __asan_old_stack_offset;
+  __sanitizer_finish_switch_fiber(nullptr,
+                                  &__asan_old_stack_bottom,
+                                  &__asan_old_stack_offset);
+#endif
 
   Run();
   sched->RunNext(Scheduler::ExitState);
@@ -66,14 +66,15 @@ static void routine_func(void *r)
   ((Routine *) r)->Run0();
 }
 
-const size_t RoutineStackAllocator::kContextSize = sizeof(ucontext_t);
+const size_t RoutineStackAllocator::kContextSize = sizeof(struct ucontext);
 
 void RoutineStackAllocator::AllocateStackAndContext(size_t &stack_size,
                                                     ucontext * &ctx_ptr, void * &stack_ptr)
 {
   stack_size = kDefaultStackSize;
-  ctx_ptr = (ucontext *) calloc(1, sizeof(ucontext_t));
+  ctx_ptr = (ucontext *) calloc(1, sizeof(struct ucontext));
   stack_ptr = malloc(kDefaultStackSize);
+  // fprintf(stderr, "alloc new ctx %p stack %p\n", ctx_ptr, stack_ptr);
 }
 
 void RoutineStackAllocator::FreeStackAndContext(ucontext *ctx_ptr, void *stack_ptr)
@@ -91,20 +92,14 @@ void Routine::InitStack(Scheduler *sched)
   size_t stack_size = 0;
   g_allocator->AllocateStackAndContext(stack_size, ctx, stack);
 
-  ctx->uc_stack.ss_sp = stack;
-  ctx->uc_stack.ss_size = stack_size;;
-  ctx->uc_stack.ss_flags = 0;
-  ctx->uc_mcontext.mc_rip = sched->link_rip;
-  ctx->uc_mcontext.mc_rbp = sched->link_rbp;
-
+  ctx->stack.stack_bottom = stack;
+  ctx->stack.size = stack_size;;
   makecontext(ctx, routine_func, this);
 }
 
-void Routine::InitFromGarbageContext(ucontext_t *c, Scheduler *sched, void *sp)
+void Routine::InitFromGarbageContext(struct ucontext *c, Scheduler *sched, void *sp)
 {
   ctx = c;
-  ctx->uc_mcontext.mc_rip = sched->link_rip;
-  ctx->uc_mcontext.mc_rbp = sched->link_rbp;
   makecontext(ctx, routine_func, this);
 }
 
@@ -179,9 +174,7 @@ Scheduler::~Scheduler()
 // This is merely a stub on the call stack. Can only be invoked by the idle routine
 void Scheduler::StartRoutineStub()
 {
-  getmcontext(&idle->ctx->uc_mcontext);
-  link_rip = idle->ctx->uc_mcontext.mc_rip;
-  link_rbp = idle->ctx->uc_mcontext.mc_rbp;
+  setjmp(idle->ctx->mcontext);
 }
 
 Scheduler *Scheduler::Current()
@@ -223,7 +216,7 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
     std::abort();
   }
 
-  ucontext_t *old_ctx = nullptr, *next_ctx = nullptr;
+  struct ucontext *old_ctx = nullptr, *next_ctx = nullptr;
   Routine *old = current, *next = nullptr;
 
   if (state == SleepState) {
@@ -239,7 +232,9 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
     if (current == idle) std::abort();
     should_delete_old = true;
     delay_garbage_ctx = old->ctx;
-    // fprintf(stderr, "ctx %p is garbage now, ss_sp %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
+    // fprintf(stderr, "ctx %p is garbage now, stack bottom %p size %lu\n",
+    //         delay_garbage_ctx, delay_garbage_ctx->stack.stack_bottom,
+    //         delay_garbage_ctx->stack.size);
   }
   old_ctx = old->ctx;
 
@@ -255,19 +250,15 @@ again:
   if (!busy_poll && ent != &ready_q) {
     next = (Routine *) ent;
     if (!next->ctx) {
-#if __has_feature(address_sanitizer)
-      next->InitStack(this);
-#else
       if (delay_garbage_ctx) {
 	// reuse the stack and context memory
-	// fprintf(stderr, "reuse ctx %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
-	next->InitFromGarbageContext(delay_garbage_ctx, this, delay_garbage_ctx->uc_stack.ss_sp);
+	// fprintf(stderr, "reuse ctx %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->stack.stack_bottom);
+	next->InitFromGarbageContext(delay_garbage_ctx, this, delay_garbage_ctx->stack.stack_bottom);
 	delay_garbage_ctx = nullptr;
 	stack_reuse = true;
       } else {
 	next->InitStack(this);
       }
-#endif
     }
     next->Detach();
     next->OnRemoveFromReadyQueue();
@@ -314,37 +305,26 @@ again:
   next_ctx = next->ctx;
   prev_ctx = stack_reuse ? nullptr : old_ctx;
   current = next;
-  // l.unlock();
 
-  __builtin_prefetch(this);
+#if __has_feature(address_sanitizer)
+  void *fake_stack;
+  __sanitizer_start_switch_fiber(&fake_stack,
+                                 next_ctx->stack.stack_bottom,
+                                 next_ctx->stack.size);
+#endif
+
   if (stack_reuse) {
     // puts("Fast switch");
-    setmcontext_light(&next_ctx->uc_mcontext);
+    swapcontext(nullptr, next_ctx);
   } else if (old_ctx != next_ctx) {
-    // fprintf(stderr, "%d (%p) context switch (%p)%p=>(%p)%p, old stack %p new stack %p\n",
-    //  	    tls_thread_pool_id, this,
-    //  	    old, old_ctx, next, next_ctx, old_ctx->uc_stack.ss_sp, next_ctx->uc_stack.ss_sp);
-    // always_assert(next->sched == this);
+    swapcontext(old_ctx, next_ctx);
 
 #if __has_feature(address_sanitizer)
-    // puts("start fiber switch");
-    __sanitizer_start_switch_fiber(&old_ctx->asan_fake_stack,
-                                   next_ctx->uc_stack.ss_sp,
-                                   next_ctx->uc_stack.ss_size);
-#endif
-    swapcontext(old_ctx, next_ctx);
-#if __has_feature(address_sanitizer)
-    if (prev_ctx) {
-      __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
-                                      (const void **) &prev_ctx->uc_stack.ss_sp,
-                                      &prev_ctx->uc_stack.ss_size);
-    } else {
-      void *fake_stack;
-      size_t fake_stack_size;
-      // puts("finishing fiber switch");
-      __sanitizer_finish_switch_fiber(old_ctx->asan_fake_stack,
-                                      (const void **) &fake_stack, &fake_stack_size);
-    }
+    const void *__asan_old_stack_bottom;
+    size_t __asan_old_stack_offset;
+    __sanitizer_finish_switch_fiber(fake_stack,
+                                    (const void **) &__asan_old_stack_bottom,
+                                    &__asan_old_stack_offset);
 #endif
   }
   Scheduler::Current()->mutex.unlock();
@@ -364,8 +344,9 @@ void Scheduler::WakeUp(Routine **routines, size_t nr_routines, bool batch)
 void Scheduler::CollectGarbage()
 {
   if (delay_garbage_ctx) {
-    // fprintf(stderr, "Collecting %p stack %p\n", delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
-    g_allocator->FreeStackAndContext(delay_garbage_ctx, delay_garbage_ctx->uc_stack.ss_sp);
+    // fprintf(stderr, "Collecting %p stack %p\n",
+    //         delay_garbage_ctx, delay_garbage_ctx->stack.stack_bottom);
+    g_allocator->FreeStackAndContext(delay_garbage_ctx, delay_garbage_ctx->stack.stack_bottom);
     delay_garbage_ctx = nullptr;
   }
 }
@@ -519,7 +500,7 @@ class IdleRoutine : public Routine {
 
 IdleRoutine::IdleRoutine()
 {
-  ctx = (ucontext_t *) calloc(1, sizeof(ucontext_t)); // just a dummy context, no make context
+  ctx = (struct ucontext *) calloc(1, sizeof(struct ucontext)); // just a dummy context, no make context
 }
 
 void IdleRoutine::Run()
