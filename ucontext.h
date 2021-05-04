@@ -46,8 +46,8 @@ static inline int swapcontext(struct ucontext *from, struct ucontext *to)
     if (arg) {
       to->arg = 0;
       unsigned char *sp = (unsigned char *) to->stack.stack_bottom;
-      sp += to->stack.size - 16;
-      __builtin_memset(sp, 0, 16);
+      sp += to->stack.size - 8;
+      __builtin_memset(sp, 0, 8);
       start_routine(sp, to->func, arg);
     } else {
       longjmp(to->mcontext, 1);
