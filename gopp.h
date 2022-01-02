@@ -14,7 +14,9 @@ struct ucontext;
 
 namespace go {
 
-// basically a link list node
+/// \brief Basically a link list node. Represents a queue.
+///
+/// An empty queue(list) is represented by the head pointing to itself.
 struct ScheduleEntity {
   ScheduleEntity *prev, *next;
 
@@ -61,6 +63,8 @@ class RoutineStackAllocator {
   virtual void FreeStackAndContext(ucontext *ctx_ptr, void *stack_ptr);
 };
 
+///
+/// \brief Per-thread scheduler.
 class Scheduler {
  public:
   typedef ScheduleEntity Queue;
@@ -132,6 +136,12 @@ class EventSource {
   Routine *sched_current() { return sched->current; }
   bool sched_is_waiting() const { return sched->waiting; }
 
+  /// \brief Locks current scheduler with another scheduler.
+  ///
+  /// \param with The other scheduler to lock with. If nullptr passed, only lock
+  ///             the current scheduler.
+  ///
+  /// The address is used for ordering to avoid deadlocks.
   void LockScheduler(Scheduler *with = nullptr) {
     if (with && with < sched) with->mutex.lock();
     sched->mutex.lock();
@@ -143,6 +153,9 @@ class EventSource {
   }
 };
 
+/// \brief
+///
+///
 class Routine : public ScheduleEntity {
  protected:
   ucontext *ctx;
@@ -210,6 +223,11 @@ Routine *Make(const T &obj)
   return new GenericRoutine<T>(obj);
 }
 
+/// \brief Creates and initializes a thread pool.
+///
+/// \param nr_threads Number of threads.
+/// \param allocator Routine stack allocator. A default allocator is used when
+///                  no allocator is provided.
 void InitThreadPool(int nr_threads = 1, RoutineStackAllocator *allocator = nullptr);
 void WaitThreadPool();
 

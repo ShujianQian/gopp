@@ -103,8 +103,14 @@ void Routine::InitFromGarbageContext(struct ucontext *c, Scheduler *sched, void 
   makecontext(ctx, routine_func, this);
 }
 
+//! A thread_local thread_pool_id used to get the scheduler associated with the
+//! current thread.
 static __thread int tls_thread_pool_id = -1;
+
+//! Vector containing schedulers assiciated with \ref g_thread_pool.
 static std::vector<Scheduler *> g_schedulers;
+
+//! Signal that notifies threads in the thread pool to exit upon idling.
 static std::atomic_bool g_thread_pool_should_exit(false);
 
 Routine::Routine()
@@ -131,8 +137,10 @@ void Routine::AddToReadyQueue(Scheduler::Queue *q, bool next_ready)
       Add(p->prev);
     }
   } else if (urgent) {
+    // if urgent add to head of queue
     Add(q);
   } else {
+    // otherwise, add to tail of queue
     Add(q->prev);
   }
 }
@@ -200,6 +208,11 @@ Scheduler *GetSchedulerFromPool(int thread_id)
   return g_schedulers[thread_id];
 }
 
+/// \brief Switch to run another Routine.
+///
+/// \param state End state of the current routine.
+/// \param sleep_q Queue of sleeping routines.
+/// \param sleep_lock Mutex guarding the sleep queue.
 void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
 {
   // fprintf(stderr, "[go] RunNext() on thread %d\n", tls_thread_pool_id);
@@ -220,6 +233,10 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   Routine *old = current, *next = nullptr;
 
   if (state == SleepState) {
+    // if this routine is set to sleep,
+    // it will not be added back to the ready queue
+    // instead, it will need to be explicitly wakeup before it can be scheduled
+    // to run again
     if (sleep_q)
       old->Add(sleep_q->prev);
     if (sleep_lock)
@@ -231,6 +248,8 @@ void Scheduler::RunNext(State state, Queue *sleep_q, std::mutex *sleep_lock)
   } else if (state == ExitState) {
     if (current == idle) std::abort();
     should_delete_old = true;
+    // delay collection of the old ucontext so that the next routine may be
+    // able to reuse the ucontext of the old routine
     delay_garbage_ctx = old->ctx;
     // fprintf(stderr, "ctx %p is garbage now, stack bottom %p size %lu\n",
     //         delay_garbage_ctx, delay_garbage_ctx->stack.stack_bottom,
@@ -248,6 +267,8 @@ again:
   auto ent = ready_q.next;
 
   if (!busy_poll && ent != &ready_q) {
+    // if not busy_poll and ready_q is not empty
+    // then get the next ready routine
     next = (Routine *) ent;
     if (!next->ctx) {
       if (delay_garbage_ctx) {
@@ -263,13 +284,21 @@ again:
     next->Detach();
     next->OnRemoveFromReadyQueue();
   } else {
+    // if busy_poll or ready_q is empty
     int timeout = -1;
     if (busy_poll && ent != &ready_q) {
+      // if busy_poll and ready_q is not empty
+      // do not block on epoll wait
+      // also do not busy_poll again, i.e. poll once and run next routine
       timeout = 0;
       busy_poll = false;
     } else {
+      // if ready_q is indeed empty
+      // first react to events from all sources
+      // and wait indefinitely on epoll_wait
       for (auto event_source : sources) {
         if (event_source->ReactEvents())
+          // if should react to events again, go back
           goto again;
       }
     }
@@ -287,8 +316,11 @@ again:
       std::abort();
     }
     if (rs < 0 && errno == EINTR) {
+      // if epoll_wait was interrupted by a signal handler
+      // retry
       goto epoll_again;
     }
+    // if event received, event source should react to the event
     for (int i = 0; i < rs; i++) {
       Event *e = (Event *) kernel_events[i].data.ptr;
       e->mask = kernel_events[i].events;
@@ -302,6 +334,9 @@ again:
     goto again;
   }
 
+  // Switch context to run the next routine
+
+  // switch scheduler states
   next_ctx = next->ctx;
   prev_ctx = stack_reuse ? nullptr : old_ctx;
   current = next;
@@ -313,6 +348,7 @@ again:
                                  next_ctx->stack.size);
 #endif
 
+  // context switch
   if (stack_reuse) {
     // puts("Fast switch");
     swapcontext(nullptr, next_ctx);
@@ -327,6 +363,7 @@ again:
                                     &__asan_old_stack_offset);
 #endif
   }
+  // if stack is not reused, will continue execution from here upon resuming
   Scheduler::Current()->mutex.unlock();
 }
 
@@ -351,6 +388,7 @@ void Scheduler::CollectGarbage()
   }
 }
 
+//! Thread pool vector containing std::thread objects.
 static std::vector<std::thread> g_thread_pool;
 
 // Schedule Events
@@ -389,13 +427,16 @@ bool ScheduleEventSource::ReactEvents()
 
   std::unique_lock<std::mutex> _(share_m);
 
+  // if pool is signaled to exit when run the idle routine
   if (g_thread_pool_should_exit.load())
     goto run_idle;
 
   ent = share_q.next;
+  // if shared_queue is empty
   if (ent == &share_q)
     goto run_idle;
 
+  // if shared_queue is not empty, add it to the ready queue of this scheduler
   r = (Routine *) ent;
   r->Detach();
   r->set_scheduler(sched);
@@ -403,17 +444,30 @@ bool ScheduleEventSource::ReactEvents()
   return true;
 
 run_idle:
+  // if current thread is not already idle_routine
+  // and the thread_pool is signaled to exit,
+  // add idle routine to the ready queue
   if (sched_current() != sched_idle_routine() || g_thread_pool_should_exit.load()) {
     sched_idle_routine()->AddToReadyQueue(sched_ready_queue());
     return true;
   } else {
+    // if the current routine is already idle routine
+    // and the thread_pool is not signaled to exit,
+    // do not react
     return false;
   }
 }
 
+///
+/// \brief Sends a Routine to this scheduler or to the shared queue. Notify.
+///
+/// \param r Pointer to the Routine to send.
+/// \param notify Whether to notify by writing to the fd.
 void ScheduleEventSource::SendEvents(Routine *r, bool notify)
 {
   uint64_t u = 1;
+
+  // if only to notify, directly writes to fd
   if (r == nullptr && notify) {
     LockScheduler(nullptr);
     if (sched_is_waiting()) {
@@ -425,12 +479,15 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
     UnlockScheduler(nullptr);
     return;
   }
+
+  // detach from the old_scheduler
   auto old_sched = r->scheduler();
   LockScheduler(old_sched);
   r->Detach();
   r->set_scheduler(sched);
 
   if (r->is_share()) {
+    // if r is a shared routine add it to the shared queue
     std::lock_guard<std::mutex> _(share_m);
     r->AddToReadyQueue(&share_q);
 
@@ -441,6 +498,7 @@ void ScheduleEventSource::SendEvents(Routine *r, bool notify)
       }
     }
   } else {
+    // otherwise, add to current scheduler's ready queue
     r->AddToReadyQueue(sched_ready_queue());
 
     if (notify && sched_is_waiting()) {
@@ -481,7 +539,11 @@ void ScheduleEventSource::SendEvents(Routine **routines, size_t nr_routines, boo
 }
 
 int ScheduleEventSource::share_fd;
+
+//! Shared ready queue.
 Scheduler::Queue ScheduleEventSource::share_q;
+
+//! Mutex guarding the shared ready queue.
 std::mutex ScheduleEventSource::share_m;
 
 void ScheduleEventSource::Initialize()
@@ -510,12 +572,19 @@ void IdleRoutine::Run()
   }
 }
 
+/// Creates and initializes a thread pool.
+///
+/// The initialization includes:
+///  * Creates a default allocator if no allocator is provided.
+///  * Creates nr_threads std::threads.
 void InitThreadPool(int nr_threads, RoutineStackAllocator *allocator)
 {
   g_allocator = (allocator == nullptr)
                 ? new RoutineStackAllocator() : allocator;
 
   ScheduleEventSource::Initialize();
+
+  // number of threads that have finished setup
   std::atomic<int> nr_up(0);
   g_schedulers.resize(nr_threads + 1, nullptr);
 
@@ -532,20 +601,26 @@ void InitThreadPool(int nr_threads, RoutineStackAllocator *allocator)
 	  }
 	  pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
 
+      // creates a detached idle routine
 	  auto idle_routine = new IdleRoutine;
 	  idle_routine->Detach();
 
+          // creates a scheduler and associates with the current thread
           auto sched = new Scheduler(idle_routine);
           sched->pool_id = i;
           tls_thread_pool_id = i;
           g_schedulers[tls_thread_pool_id] = sched;
 
+      // thread setup finished, increment up counter
 	  nr_up.fetch_add(1);
 
-          sched->StartRoutineStub();
+          sched->StartRoutineStub();  // sets context for the idle routine
+                                      // will jump here when idle
 	  idle_routine->Run();
 	}));
   }
+
+  // spin until all threads have finished setup
   while (nr_up.load() <= nr_threads);
 }
 
