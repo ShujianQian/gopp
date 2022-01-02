@@ -5,7 +5,7 @@ add_definitions(-std=c++17 -fno-omit-frame-pointer)
 set(CMAKE_C_FLAGS_DEBUG "-g -fsanitize=address")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -fsanitize=address")
 
-add_library(gopp channels.cc gopp.cc asm.S)
+add_library(gopp channels.cc gopp.cc start-x86_64.S)
 
 # test binary
 add_executable(buffers-sample buffers-sample.cc)
