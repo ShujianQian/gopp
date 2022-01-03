@@ -1,4 +1,8 @@
-// -*- c++ -*-
+////////////////////////////////////////////////////////////////////////////////
+/// \file gopp.h
+///
+/// \brief Interface of the gopp thread pool library.
+////////////////////////////////////////////////////////////////////////////////
 
 #ifndef GOPP_H
 #define GOPP_H
@@ -102,8 +106,22 @@ class Scheduler {
     SleepState,
     ExitState,
   };
+  /// \brief Ask the scheduler to run a different Routine.
+  ///
+  /// \param state The state that this Routine is in.
+  /// \param q The sleep queue to add to if Routine is in State::SleepState.
+  /// \param sleep_lock The mutex guarding the sleep queue.
+  ///
+  /// The Routine calling RunNext can be put into sleep, put on the ready queue,
+  /// put on the ready queue to run next, terminated and cleaned.
   void RunNext(State state, Queue *q = nullptr, std::mutex *sleep_lock = nullptr);
   void CollectGarbage();
+  /// \brief Add a Routine to the scheduler.
+  ///
+  /// \param r The routine to be added. If only to notify the scheduler, use
+  ///          a nullptr.
+  /// \param batch Whether to batch multiple Routine before notifying the
+  ///              scheduler.
   void WakeUp(Routine *r = nullptr, bool batch = false);
   void WakeUp(Routine **routines, size_t nr_routines, bool batch = false);
 
@@ -115,6 +133,8 @@ class Scheduler {
   EventSource *event_source(int idx) const { return sources[idx]; }
 
   static Scheduler *Current();
+  /// \brief Get the id of the current thread that the scheduler is associated
+  /// with.
   static int CurrentThreadPoolId();
 };
 
@@ -153,7 +173,7 @@ class EventSource {
   }
 };
 
-/// \brief
+/// \brief Routines to be scheduled and executed in the thread pool.
 ///
 ///
 class Routine : public ScheduleEntity {
@@ -193,21 +213,37 @@ class Routine : public ScheduleEntity {
   Scheduler *scheduler() const { return sched; }
 
   // internal use
+
+  /// \brief Associates this routine with a scheduler.
+  ///
+  /// \param v The Scheduler to be associated with.
   void set_scheduler(Scheduler *v) { sched = v; }
   virtual void AddToReadyQueue(Scheduler::Queue *q, bool next_ready = false);
   virtual void OnRemoveFromReadyQueue() {}
   virtual void OnFinish() {}
 
   virtual void Run() = 0;
+  /// \brief Wraps around the Run virtual function and exits after returning from
+  /// the Run function call
   void Run0();
 
  protected:
+  /// \brief Allocate a new stack and makes a context.
+  ///
+  /// \param sched Unused.
   void InitStack(Scheduler *sched);
+  /// \brief Reuse stack and context from an existing routine.
+  ///
+  /// \param c The \ref ucontext to be reused.
+  /// \param sched Unused.
+  /// \param sp Pointer to the stack to be reused.
   void InitFromGarbageContext(ucontext *c, Scheduler *sched, void *sp);
 };
 
 static_assert(sizeof(Routine) % 64 == 0, "Cacheline should be aligned");
 
+/// \brief Generic Routine class that takes a callable object and invokes it
+///        during Run().
 template <class T>
 class GenericRoutine : public Routine {
   T obj;
@@ -217,6 +253,11 @@ class GenericRoutine : public Routine {
   virtual void Run() { obj.operator()(); }
 };
 
+/// \brief Creates a GenericRoutine object from a callable.
+///
+/// \tparam T Callable type.
+/// \param obj Callable object.
+/// \return GenericRoutine that invokes the callable during run.
 template <class T>
 Routine *Make(const T &obj)
 {
@@ -229,8 +270,15 @@ Routine *Make(const T &obj)
 /// \param allocator Routine stack allocator. A default allocator is used when
 ///                  no allocator is provided.
 void InitThreadPool(int nr_threads = 1, RoutineStackAllocator *allocator = nullptr);
+
+///
+/// \brief Signals the threads to finish and joins the thread pool.
 void WaitThreadPool();
 
+/// \brief Access the Scheduler associated with a particular thread.
+///
+/// \param thread_id ID of the thread that the Scheduler is associated with.
+/// \return Pointer to the scheduler associated with the thread.
 Scheduler *GetSchedulerFromPool(int thread_id);
 
 class InputChannel {

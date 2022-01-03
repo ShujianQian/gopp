@@ -1,3 +1,9 @@
+////////////////////////////////////////////////////////////////////////////////
+/// \file gopp.cc
+///
+/// \brief Implementation of the gopp thread pool.
+////////////////////////////////////////////////////////////////////////////////
+
 #include "gopp.h"
 #include <cassert>
 #include <cstdio>
@@ -57,7 +63,10 @@ void Routine::Run0()
                                   &__asan_old_stack_offset);
 #endif
 
+  // invokes virtual Run() function
   Run();
+
+  // exit and collect routine
   sched->RunNext(Scheduler::ExitState);
 }
 
